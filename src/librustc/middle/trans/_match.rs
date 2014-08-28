@@ -619,7 +619,7 @@ fn get_options(bcx: &Block, m: &[Match], col: uint) -> Vec<Opt> {
             }
             ast::PatIdent(..) | ast::PatEnum(..) | ast::PatStruct(..) => {
                 // This is either an enum variant or a variable binding.
-                let opt_def = ccx.tcx.def_map.borrow().find_copy(&cur.id);
+                let opt_def = ccx.tcx().def_map.borrow().find_copy(&cur.id);
                 match opt_def {
                     Some(def::DefVariant(enum_id, var_id, _)) => {
                         let variant = ty::enum_variant_with_id(ccx.tcx(), enum_id, var_id);
