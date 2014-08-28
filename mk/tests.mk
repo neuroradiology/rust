@@ -195,7 +195,9 @@ check-docs: cleantestlibs cleantmptestlogs check-stage2-docs
 	$(Q)$(CFG_PYTHON) $(S)src/etc/check-summary.py tmp/*.log
 
 # NOTE: Remove after reprogramming windows bots
-check-fast: check-lite
+check-fast: cleantestlibs cleantmptestlogs \
+	check-stage2-rpass check-stage2-rmake
+	$(Q)$(CFG_PYTHON) $(S)src/etc/check-summary.py tmp/*.log
 
 # Some less critical tests that are not prone to breakage.
 # Not run as part of the normal test suite, but tested by bors on checkin.
