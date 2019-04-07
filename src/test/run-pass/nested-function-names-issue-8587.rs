@@ -1,40 +1,31 @@
-// Copyright 2013 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 // Make sure nested functions are separate, even if they have
 // equal name.
 //
 // Issue #8587
 
+
 pub struct X;
 
 impl X {
-    fn f(&self) -> int {
+    fn f(&self) -> isize {
         #[inline(never)]
-        fn inner() -> int {
+        fn inner() -> isize {
             0
         }
         inner()
     }
 
-    fn g(&self) -> int {
+    fn g(&self) -> isize {
         #[inline(never)]
-        fn inner_2() -> int {
+        fn inner_2() -> isize {
             1
         }
         inner_2()
     }
 
-    fn h(&self) -> int {
+    fn h(&self) -> isize {
         #[inline(never)]
-        fn inner() -> int {
+        fn inner() -> isize {
             2
         }
         inner()

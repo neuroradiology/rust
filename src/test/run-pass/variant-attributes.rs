@@ -1,14 +1,10 @@
-// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
+#![allow(unused_attributes)]
+#![allow(non_camel_case_types)]
+#![allow(dead_code)]
 // pp-exact - Make sure we actually print the attributes
+// pretty-expanded FIXME #23616
+
+#![feature(custom_attribute)]
 
 enum crew_of_enterprise_d {
 
@@ -36,4 +32,7 @@ enum crew_of_enterprise_d {
 
 fn boldly_go(_crew_member: crew_of_enterprise_d, _where: String) { }
 
-pub fn main() { boldly_go(worf, "where no one has gone before".to_string()); }
+pub fn main() {
+    boldly_go(crew_of_enterprise_d::worf,
+              "where no one has gone before".to_string());
+}

@@ -1,198 +1,292 @@
-// Copyright 2012-2013 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! This module is used to store stuff from Rust's AST in a more convenient
 //! manner (and with prettier names) before cleaning.
+pub use self::StructType::*;
 
-use syntax;
-use syntax::codemap::Span;
 use syntax::ast;
+use syntax::ast::{Name, NodeId};
 use syntax::attr;
-use syntax::ast::{Ident, NodeId};
+use syntax::ext::base::MacroKind;
+use syntax::ptr::P;
+use syntax::source_map::Spanned;
+use syntax_pos::{self, Span};
 
-use std::gc::Gc;
+use rustc::hir;
+use rustc::hir::def_id::CrateNum;
 
 pub struct Module {
-    pub name: Option<Ident>,
-    pub attrs: Vec<ast::Attribute>,
+    pub name: Option<Name>,
+    pub attrs: hir::HirVec<ast::Attribute>,
     pub where_outer: Span,
     pub where_inner: Span,
+    pub extern_crates: Vec<ExternCrate>,
+    pub imports: Vec<Import>,
     pub structs: Vec<Struct>,
+    pub unions: Vec<Union>,
     pub enums: Vec<Enum>,
     pub fns: Vec<Function>,
     pub mods: Vec<Module>,
     pub id: NodeId,
     pub typedefs: Vec<Typedef>,
+    pub existentials: Vec<Existential>,
     pub statics: Vec<Static>,
+    pub constants: Vec<Constant>,
     pub traits: Vec<Trait>,
-    pub vis: ast::Visibility,
+    pub vis: hir::Visibility,
     pub stab: Option<attr::Stability>,
+    pub depr: Option<attr::Deprecation>,
     pub impls: Vec<Impl>,
-    pub foreigns: Vec<ast::ForeignMod>,
-    pub view_items: Vec<ast::ViewItem>,
+    pub foreigns: Vec<hir::ForeignMod>,
     pub macros: Vec<Macro>,
+    pub proc_macros: Vec<ProcMacro>,
+    pub trait_aliases: Vec<TraitAlias>,
     pub is_crate: bool,
 }
 
 impl Module {
-    pub fn new(name: Option<Ident>) -> Module {
+    pub fn new(name: Option<Name>) -> Module {
         Module {
             name       : name,
-            id: 0,
-            vis: ast::Inherited,
+            id: ast::CRATE_NODE_ID,
+            vis: Spanned { span: syntax_pos::DUMMY_SP, node: hir::VisibilityKind::Inherited },
             stab: None,
-            where_outer: syntax::codemap::DUMMY_SP,
-            where_inner: syntax::codemap::DUMMY_SP,
-            attrs      : Vec::new(),
-            structs    : Vec::new(),
-            enums      : Vec::new(),
-            fns        : Vec::new(),
-            mods       : Vec::new(),
-            typedefs   : Vec::new(),
-            statics    : Vec::new(),
-            traits     : Vec::new(),
-            impls      : Vec::new(),
-            view_items : Vec::new(),
-            foreigns   : Vec::new(),
-            macros     : Vec::new(),
+            depr: None,
+            where_outer: syntax_pos::DUMMY_SP,
+            where_inner: syntax_pos::DUMMY_SP,
+            attrs      : hir::HirVec::new(),
+            extern_crates: Vec::new(),
+            imports    :   Vec::new(),
+            structs    :   Vec::new(),
+            unions     :   Vec::new(),
+            enums      :   Vec::new(),
+            fns        :   Vec::new(),
+            mods       :   Vec::new(),
+            typedefs   :   Vec::new(),
+            existentials:  Vec::new(),
+            statics    :   Vec::new(),
+            constants  :   Vec::new(),
+            traits     :   Vec::new(),
+            impls      :   Vec::new(),
+            foreigns   :   Vec::new(),
+            macros     :   Vec::new(),
+            proc_macros:   Vec::new(),
+            trait_aliases: Vec::new(),
             is_crate   : false,
         }
     }
 }
 
-#[deriving(Show, Clone, Encodable, Decodable)]
+#[derive(Debug, Clone, RustcEncodable, RustcDecodable, Copy)]
 pub enum StructType {
-    /// A normal struct
+    /// A braced struct
     Plain,
     /// A tuple struct
     Tuple,
-    /// A newtype struct (tuple struct with one element)
-    Newtype,
     /// A unit struct
-    Unit
-}
-
-pub enum TypeBound {
-    RegionBound,
-    TraitBound(ast::TraitRef)
+    Unit,
 }
 
 pub struct Struct {
-    pub vis: ast::Visibility,
+    pub vis: hir::Visibility,
     pub stab: Option<attr::Stability>,
-    pub id: NodeId,
+    pub depr: Option<attr::Deprecation>,
+    pub id: hir::HirId,
     pub struct_type: StructType,
-    pub name: Ident,
-    pub generics: ast::Generics,
-    pub attrs: Vec<ast::Attribute>,
-    pub fields: Vec<ast::StructField>,
+    pub name: Name,
+    pub generics: hir::Generics,
+    pub attrs: hir::HirVec<ast::Attribute>,
+    pub fields: hir::HirVec<hir::StructField>,
+    pub whence: Span,
+}
+
+pub struct Union {
+    pub vis: hir::Visibility,
+    pub stab: Option<attr::Stability>,
+    pub depr: Option<attr::Deprecation>,
+    pub id: hir::HirId,
+    pub struct_type: StructType,
+    pub name: Name,
+    pub generics: hir::Generics,
+    pub attrs: hir::HirVec<ast::Attribute>,
+    pub fields: hir::HirVec<hir::StructField>,
     pub whence: Span,
 }
 
 pub struct Enum {
-    pub vis: ast::Visibility,
+    pub vis: hir::Visibility,
     pub stab: Option<attr::Stability>,
-    pub variants: Vec<Variant>,
-    pub generics: ast::Generics,
-    pub attrs: Vec<ast::Attribute>,
-    pub id: NodeId,
+    pub depr: Option<attr::Deprecation>,
+    pub variants: hir::HirVec<Variant>,
+    pub generics: hir::Generics,
+    pub attrs: hir::HirVec<ast::Attribute>,
+    pub id: hir::HirId,
     pub whence: Span,
-    pub name: Ident,
+    pub name: Name,
 }
 
 pub struct Variant {
-    pub name: Ident,
-    pub attrs: Vec<ast::Attribute>,
-    pub kind: ast::VariantKind,
-    pub id: ast::NodeId,
-    pub vis: ast::Visibility,
+    pub name: Name,
+    pub id: hir::HirId,
+    pub attrs: hir::HirVec<ast::Attribute>,
+    pub def: hir::VariantData,
     pub stab: Option<attr::Stability>,
+    pub depr: Option<attr::Deprecation>,
     pub whence: Span,
 }
 
 pub struct Function {
-    pub decl: ast::FnDecl,
-    pub attrs: Vec<ast::Attribute>,
-    pub id: NodeId,
-    pub name: Ident,
-    pub vis: ast::Visibility,
+    pub decl: hir::FnDecl,
+    pub attrs: hir::HirVec<ast::Attribute>,
+    pub id: hir::HirId,
+    pub name: Name,
+    pub vis: hir::Visibility,
     pub stab: Option<attr::Stability>,
-    pub fn_style: ast::FnStyle,
+    pub depr: Option<attr::Deprecation>,
+    pub header: hir::FnHeader,
     pub whence: Span,
-    pub generics: ast::Generics,
+    pub generics: hir::Generics,
+    pub body: hir::BodyId,
 }
 
 pub struct Typedef {
-    pub ty: ast::P<ast::Ty>,
-    pub gen: ast::Generics,
-    pub name: Ident,
-    pub id: ast::NodeId,
-    pub attrs: Vec<ast::Attribute>,
+    pub ty: P<hir::Ty>,
+    pub gen: hir::Generics,
+    pub name: Name,
+    pub id: hir::HirId,
+    pub attrs: hir::HirVec<ast::Attribute>,
     pub whence: Span,
-    pub vis: ast::Visibility,
+    pub vis: hir::Visibility,
     pub stab: Option<attr::Stability>,
+    pub depr: Option<attr::Deprecation>,
 }
 
-pub struct Static {
-    pub type_: ast::P<ast::Ty>,
-    pub mutability: ast::Mutability,
-    pub expr: Gc<ast::Expr>,
-    pub name: Ident,
-    pub attrs: Vec<ast::Attribute>,
-    pub vis: ast::Visibility,
+pub struct Existential {
+    pub exist_ty: hir::ExistTy,
+    pub name: Name,
+    pub id: hir::HirId,
+    pub attrs: hir::HirVec<ast::Attribute>,
+    pub whence: Span,
+    pub vis: hir::Visibility,
     pub stab: Option<attr::Stability>,
-    pub id: ast::NodeId,
+    pub depr: Option<attr::Deprecation>,
+}
+
+#[derive(Debug)]
+pub struct Static {
+    pub type_: P<hir::Ty>,
+    pub mutability: hir::Mutability,
+    pub expr: hir::BodyId,
+    pub name: Name,
+    pub attrs: hir::HirVec<ast::Attribute>,
+    pub vis: hir::Visibility,
+    pub stab: Option<attr::Stability>,
+    pub depr: Option<attr::Deprecation>,
+    pub id: hir::HirId,
+    pub whence: Span,
+}
+
+pub struct Constant {
+    pub type_: P<hir::Ty>,
+    pub expr: hir::BodyId,
+    pub name: Name,
+    pub attrs: hir::HirVec<ast::Attribute>,
+    pub vis: hir::Visibility,
+    pub stab: Option<attr::Stability>,
+    pub depr: Option<attr::Deprecation>,
+    pub id: hir::HirId,
     pub whence: Span,
 }
 
 pub struct Trait {
-    pub name: Ident,
-    pub items: Vec<ast::TraitItem>, //should be TraitItem
-    pub generics: ast::Generics,
-    pub bounds: Vec<ast::TyParamBound>,
-    pub attrs: Vec<ast::Attribute>,
-    pub id: ast::NodeId,
+    pub is_auto: hir::IsAuto,
+    pub unsafety: hir::Unsafety,
+    pub name: Name,
+    pub items: hir::HirVec<hir::TraitItem>,
+    pub generics: hir::Generics,
+    pub bounds: hir::HirVec<hir::GenericBound>,
+    pub attrs: hir::HirVec<ast::Attribute>,
+    pub id: hir::HirId,
     pub whence: Span,
-    pub vis: ast::Visibility,
+    pub vis: hir::Visibility,
     pub stab: Option<attr::Stability>,
+    pub depr: Option<attr::Deprecation>,
 }
 
+pub struct TraitAlias {
+    pub name: Name,
+    pub generics: hir::Generics,
+    pub bounds: hir::HirVec<hir::GenericBound>,
+    pub attrs: hir::HirVec<ast::Attribute>,
+    pub id: hir::HirId,
+    pub whence: Span,
+    pub vis: hir::Visibility,
+    pub stab: Option<attr::Stability>,
+    pub depr: Option<attr::Deprecation>,
+}
+
+#[derive(Debug)]
 pub struct Impl {
-    pub generics: ast::Generics,
-    pub trait_: Option<ast::TraitRef>,
-    pub for_: ast::P<ast::Ty>,
-    pub items: Vec<ast::ImplItem>,
-    pub attrs: Vec<ast::Attribute>,
+    pub unsafety: hir::Unsafety,
+    pub polarity: hir::ImplPolarity,
+    pub defaultness: hir::Defaultness,
+    pub generics: hir::Generics,
+    pub trait_: Option<hir::TraitRef>,
+    pub for_: P<hir::Ty>,
+    pub items: hir::HirVec<hir::ImplItem>,
+    pub attrs: hir::HirVec<ast::Attribute>,
     pub whence: Span,
-    pub vis: ast::Visibility,
+    pub vis: hir::Visibility,
     pub stab: Option<attr::Stability>,
-    pub id: ast::NodeId,
+    pub depr: Option<attr::Deprecation>,
+    pub id: hir::HirId,
 }
 
+// For Macro we store the DefId instead of the NodeId, since we also create
+// these imported macro_rules (which only have a DUMMY_NODE_ID).
 pub struct Macro {
-    pub name: Ident,
-    pub id: ast::NodeId,
-    pub attrs: Vec<ast::Attribute>,
+    pub name: Name,
+    pub def_id: hir::def_id::DefId,
+    pub attrs: hir::HirVec<ast::Attribute>,
     pub whence: Span,
+    pub matchers: hir::HirVec<Span>,
     pub stab: Option<attr::Stability>,
+    pub depr: Option<attr::Deprecation>,
+    pub imported_from: Option<Name>,
 }
 
-pub fn struct_type_from_def(sd: &ast::StructDef) -> StructType {
-    if sd.ctor_id.is_some() {
-        // We are in a tuple-struct
-        match sd.fields.len() {
-            0 => Unit,
-            1 => Newtype,
-            _ => Tuple
-        }
-    } else {
-        Plain
+pub struct ExternCrate {
+    pub name: Name,
+    pub cnum: CrateNum,
+    pub path: Option<String>,
+    pub vis: hir::Visibility,
+    pub attrs: hir::HirVec<ast::Attribute>,
+    pub whence: Span,
+}
+
+pub struct Import {
+    pub name: Name,
+    pub id: hir::HirId,
+    pub vis: hir::Visibility,
+    pub attrs: hir::HirVec<ast::Attribute>,
+    pub path: hir::Path,
+    pub glob: bool,
+    pub whence: Span,
+}
+
+pub struct ProcMacro {
+    pub name: Name,
+    pub id: hir::HirId,
+    pub kind: MacroKind,
+    pub helpers: Vec<Name>,
+    pub attrs: hir::HirVec<ast::Attribute>,
+    pub whence: Span,
+    pub stab: Option<attr::Stability>,
+    pub depr: Option<attr::Deprecation>,
+}
+
+pub fn struct_type_from_def(vdata: &hir::VariantData) -> StructType {
+    match *vdata {
+        hir::VariantData::Struct(..) => Plain,
+        hir::VariantData::Tuple(..) => Tuple,
+        hir::VariantData::Unit(..) => Unit,
     }
 }

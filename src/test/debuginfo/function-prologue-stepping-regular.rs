@@ -1,17 +1,9 @@
-// Copyright 2013-2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 // This test case checks if function arguments already have the correct value when breaking at the
 // beginning of a function.
 
+// min-lldb-version: 310
 // ignore-gdb
+// ignore-test // Test temporarily ignored due to debuginfo tests being disabled, see PR 47155
 // compile-flags:-g
 
 // lldb-command:breakpoint set --name immediate_args
@@ -124,9 +116,11 @@
 // lldb-check:[...]$31 = 45
 // lldb-command:continue
 
-#![allow(unused_variable)]
+#![allow(unused_variables)]
+#![feature(omit_gdb_pretty_printer_section)]
+#![omit_gdb_pretty_printer_section]
 
-fn immediate_args(a: int, b: bool, c: f64) {
+fn immediate_args(a: isize, b: bool, c: f64) {
     ()
 }
 
@@ -146,7 +140,7 @@ fn non_immediate_args(a: BigStruct, b: BigStruct) {
 }
 
 fn binding(a: i64, b: u64, c: f64) {
-    let x = 0i;
+    let x = 0;
 }
 
 fn assignment(mut a: u64, b: u64, c: f64) {
@@ -154,7 +148,7 @@ fn assignment(mut a: u64, b: u64, c: f64) {
 }
 
 fn function_call(x: u64, y: u64, z: f64) {
-    std::io::stdio::print("Hi!")
+    println!("Hi!")
 }
 
 fn identifier(x: u64, y: u64, z: f64) -> u64 {

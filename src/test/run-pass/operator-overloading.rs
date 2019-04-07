@@ -1,50 +1,50 @@
-// Copyright 2012-2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-
+#![allow(unused_variables)]
 use std::cmp;
 use std::ops;
 
-#[deriving(Show)]
+#[derive(Copy, Clone, Debug)]
 struct Point {
-    x: int,
-    y: int
+    x: isize,
+    y: isize
 }
 
-impl ops::Add<Point,Point> for Point {
-    fn add(&self, other: &Point) -> Point {
-        Point {x: self.x + (*other).x, y: self.y + (*other).y}
+impl ops::Add for Point {
+    type Output = Point;
+
+    fn add(self, other: Point) -> Point {
+        Point {x: self.x + other.x, y: self.y + other.y}
     }
 }
 
-impl ops::Sub<Point,Point> for Point {
-    fn sub(&self, other: &Point) -> Point {
-        Point {x: self.x - (*other).x, y: self.y - (*other).y}
+impl ops::Sub for Point {
+    type Output = Point;
+
+    fn sub(self, other: Point) -> Point {
+        Point {x: self.x - other.x, y: self.y - other.y}
     }
 }
 
-impl ops::Neg<Point> for Point {
-    fn neg(&self) -> Point {
+impl ops::Neg for Point {
+    type Output = Point;
+
+    fn neg(self) -> Point {
         Point {x: -self.x, y: -self.y}
     }
 }
 
-impl ops::Not<Point> for Point {
-    fn not(&self) -> Point {
+impl ops::Not for Point {
+    type Output = Point;
+
+    fn not(self) -> Point {
         Point {x: !self.x, y: !self.y }
     }
 }
 
-impl ops::Index<bool,int> for Point {
-    fn index(&self, x: &bool) -> &int {
-        if *x {
+impl ops::Index<bool> for Point {
+    type Output = isize;
+
+    fn index(&self, x: bool) -> &isize {
+        if x {
             &self.x
         } else {
             &self.y
@@ -73,6 +73,7 @@ pub fn main() {
     assert_eq!(q.y, !(p.y));
 
     // Issue #1733
-    let result: proc(int) = proc(_)();
     result(p[true]);
 }
+
+fn result(i: isize) { }

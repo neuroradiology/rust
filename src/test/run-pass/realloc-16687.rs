@@ -1,22 +1,12 @@
-// Copyright 2013-2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 // alloc::heap::reallocate test.
 //
 // Ideally this would be revised to use no_std, but for now it serves
 // well enough to reproduce (and illustrate) the bug from #16687.
 
-extern crate alloc;
+#![feature(allocator_api)]
 
-use alloc::heap;
-use std::ptr;
+use std::alloc::{Global, Alloc, Layout, handle_alloc_error};
+use std::ptr::{self, NonNull};
 
 fn main() {
     unsafe {
@@ -25,80 +15,97 @@ fn main() {
 }
 
 unsafe fn test_triangle() -> bool {
-    static COUNT : uint = 16;
-    let mut ascend = Vec::from_elem(COUNT, ptr::mut_null());
-    let ascend = ascend.as_mut_slice();
-    static ALIGN : uint = 1;
+    static COUNT : usize = 16;
+    let mut ascend = vec![ptr::null_mut(); COUNT];
+    let ascend = &mut *ascend;
+    static ALIGN : usize = 1;
 
-    // Checks that `ascend` forms triangle of acending size formed
+    // Checks that `ascend` forms triangle of ascending size formed
     // from pairs of rows (where each pair of rows is equally sized),
     // and the elements of the triangle match their row-pair index.
     unsafe fn sanity_check(ascend: &[*mut u8]) {
-        for i in range(0u, COUNT / 2) {
+        for i in 0..COUNT / 2 {
             let (p0, p1, size) = (ascend[2*i], ascend[2*i+1], idx_to_size(i));
-            for j in range(0u, size) {
-                assert_eq!(*p0.offset(j as int), i as u8);
-                assert_eq!(*p1.offset(j as int), i as u8);
+            for j in 0..size {
+                assert_eq!(*p0.add(j), i as u8);
+                assert_eq!(*p1.add(j), i as u8);
             }
         }
     }
 
     static PRINT : bool = false;
 
-    unsafe fn allocate(size: uint, align: uint) -> *mut u8 {
-        if PRINT { println!("allocate(size={:u} align={:u})", size, align); }
-
-        let ret = heap::allocate(size, align);
-
-        if PRINT { println!("allocate(size={:u} align={:u}) ret: 0x{:010x}",
-                            size, align, ret as uint);
-        }
-
-        ret
-    }
-    unsafe fn reallocate(ptr: *mut u8, size: uint, align: uint,
-                             old_size: uint) -> *mut u8 {
+    unsafe fn allocate(layout: Layout) -> *mut u8 {
         if PRINT {
-            println!("reallocate(ptr=0x{:010x} size={:u} align={:u} old_size={:u})",
-                     ptr as uint, size, align, old_size);
+            println!("allocate({:?})", layout);
         }
 
-        let ret = heap::reallocate(ptr, size, align, old_size);
+        let ret = Global.alloc(layout).unwrap_or_else(|_| handle_alloc_error(layout));
 
         if PRINT {
-            println!("reallocate(ptr=0x{:010x} size={:u} align={:u} old_size={:u}) \
-                      ret: 0x{:010x}",
-                     ptr as uint, size, align, old_size, ret as uint);
+            println!("allocate({:?}) = {:?}", layout, ret);
         }
-        ret
+
+        ret.cast().as_ptr()
     }
 
-    fn idx_to_size(i: uint) -> uint { (i+1) * 10 }
+    unsafe fn deallocate(ptr: *mut u8, layout: Layout) {
+        if PRINT {
+            println!("deallocate({:?}, {:?}", ptr, layout);
+        }
+
+        Global.dealloc(NonNull::new_unchecked(ptr), layout);
+    }
+
+    unsafe fn reallocate(ptr: *mut u8, old: Layout, new: Layout) -> *mut u8 {
+        if PRINT {
+            println!("reallocate({:?}, old={:?}, new={:?})", ptr, old, new);
+        }
+
+        let ret = Global.realloc(NonNull::new_unchecked(ptr), old, new.size())
+            .unwrap_or_else(|_| handle_alloc_error(
+                Layout::from_size_align_unchecked(new.size(), old.align())
+            ));
+
+        if PRINT {
+            println!("reallocate({:?}, old={:?}, new={:?}) = {:?}",
+                     ptr, old, new, ret);
+        }
+        ret.cast().as_ptr()
+    }
+
+    fn idx_to_size(i: usize) -> usize { (i+1) * 10 }
 
     // Allocate pairs of rows that form a triangle shape.  (Hope is
     // that at least two rows will be allocated near each other, so
     // that we trigger the bug (a buffer overrun) in an observable
     // way.)
-    for i in range(0u, COUNT / 2) {
+    for i in 0..COUNT / 2 {
         let size = idx_to_size(i);
-        ascend[2*i]   = allocate(size, ALIGN);
-        ascend[2*i+1] = allocate(size, ALIGN);
+        ascend[2*i]   = allocate(Layout::from_size_align(size, ALIGN).unwrap());
+        ascend[2*i+1] = allocate(Layout::from_size_align(size, ALIGN).unwrap());
     }
 
     // Initialize each pair of rows to distinct value.
-    for i in range(0u, COUNT / 2) {
+    for i in 0..COUNT / 2 {
         let (p0, p1, size) = (ascend[2*i], ascend[2*i+1], idx_to_size(i));
-        for j in range(0, size) {
-            *p0.offset(j as int) = i as u8;
-            *p1.offset(j as int) = i as u8;
+        for j in 0..size {
+            *p0.add(j) = i as u8;
+            *p1.add(j) = i as u8;
         }
     }
 
-    sanity_check(ascend.as_slice());
-    test_1(ascend);
-    test_2(ascend);
-    test_3(ascend);
-    test_4(ascend);
+    sanity_check(&*ascend);
+    test_1(ascend); // triangle -> square
+    test_2(ascend); // square -> triangle
+    test_3(ascend); // triangle -> square
+    test_4(ascend); // square -> triangle
+
+    for i in 0..COUNT / 2 {
+        let size = idx_to_size(i);
+        deallocate(ascend[2*i], Layout::from_size_align(size, ALIGN).unwrap());
+        deallocate(ascend[2*i+1], Layout::from_size_align(size, ALIGN).unwrap());
+    }
 
     return true;
 
@@ -108,60 +115,68 @@ unsafe fn test_triangle() -> bool {
     // rows as we go.
     unsafe fn test_1(ascend: &mut [*mut u8]) {
         let new_size = idx_to_size(COUNT-1);
-        for i in range(0u, COUNT / 2) {
+        let new = Layout::from_size_align(new_size, ALIGN).unwrap();
+        for i in 0..COUNT / 2 {
             let (p0, p1, old_size) = (ascend[2*i], ascend[2*i+1], idx_to_size(i));
             assert!(old_size < new_size);
+            let old = Layout::from_size_align(old_size, ALIGN).unwrap();
 
-            ascend[2*i] = reallocate(p0, new_size, ALIGN, old_size);
-            sanity_check(ascend.as_slice());
+            ascend[2*i] = reallocate(p0, old.clone(), new.clone());
+            sanity_check(&*ascend);
 
-            ascend[2*i+1] = reallocate(p1, new_size, ALIGN, old_size);
-            sanity_check(ascend.as_slice());
+            ascend[2*i+1] = reallocate(p1, old.clone(), new.clone());
+            sanity_check(&*ascend);
         }
     }
 
     // Test 2: turn the square back into a triangle, top to bottom.
     unsafe fn test_2(ascend: &mut [*mut u8]) {
         let old_size = idx_to_size(COUNT-1);
-        for i in range(0u, COUNT / 2) {
+        let old = Layout::from_size_align(old_size, ALIGN).unwrap();
+        for i in 0..COUNT / 2 {
             let (p0, p1, new_size) = (ascend[2*i], ascend[2*i+1], idx_to_size(i));
             assert!(new_size < old_size);
+            let new = Layout::from_size_align(new_size, ALIGN).unwrap();
 
-            ascend[2*i] = reallocate(p0, new_size, ALIGN, old_size);
-            sanity_check(ascend.as_slice());
+            ascend[2*i] = reallocate(p0, old.clone(), new.clone());
+            sanity_check(&*ascend);
 
-            ascend[2*i+1] = reallocate(p1, new_size, ALIGN, old_size);
-            sanity_check(ascend.as_slice());
+            ascend[2*i+1] = reallocate(p1, old.clone(), new.clone());
+            sanity_check(&*ascend);
         }
     }
 
     // Test 3: turn triangle into a square, bottom to top.
     unsafe fn test_3(ascend: &mut [*mut u8]) {
         let new_size = idx_to_size(COUNT-1);
-        for i in range(0u, COUNT / 2).rev() {
+        let new = Layout::from_size_align(new_size, ALIGN).unwrap();
+        for i in (0..COUNT / 2).rev() {
             let (p0, p1, old_size) = (ascend[2*i], ascend[2*i+1], idx_to_size(i));
             assert!(old_size < new_size);
+            let old = Layout::from_size_align(old_size, ALIGN).unwrap();
 
-            ascend[2*i+1] = reallocate(p1, new_size, ALIGN, old_size);
-            sanity_check(ascend.as_slice());
+            ascend[2*i+1] = reallocate(p1, old.clone(), new.clone());
+            sanity_check(&*ascend);
 
-            ascend[2*i] = reallocate(p0, new_size, ALIGN, old_size);
-            sanity_check(ascend.as_slice());
+            ascend[2*i] = reallocate(p0, old.clone(), new.clone());
+            sanity_check(&*ascend);
         }
     }
 
     // Test 4: turn the square back into a triangle, bottom to top.
     unsafe fn test_4(ascend: &mut [*mut u8]) {
         let old_size = idx_to_size(COUNT-1);
-        for i in range(0u, COUNT / 2).rev() {
+        let old = Layout::from_size_align(old_size, ALIGN).unwrap();
+        for i in (0..COUNT / 2).rev() {
             let (p0, p1, new_size) = (ascend[2*i], ascend[2*i+1], idx_to_size(i));
             assert!(new_size < old_size);
+            let new = Layout::from_size_align(new_size, ALIGN).unwrap();
 
-            ascend[2*i+1] = reallocate(p1, new_size, ALIGN, old_size);
-            sanity_check(ascend.as_slice());
+            ascend[2*i+1] = reallocate(p1, old.clone(), new.clone());
+            sanity_check(&*ascend);
 
-            ascend[2*i] = reallocate(p0, new_size, ALIGN, old_size);
-            sanity_check(ascend.as_slice());
+            ascend[2*i] = reallocate(p0, old.clone(), new.clone());
+            sanity_check(&*ascend);
         }
     }
 }

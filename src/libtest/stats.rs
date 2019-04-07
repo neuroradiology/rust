@@ -1,24 +1,10 @@
-// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+#![allow(missing_docs)]
+#![allow(deprecated)] // Float
 
-#![allow(missing_doc)]
-
-use std::collections::hashmap;
-use std::fmt::Show;
-use std::hash::Hash;
-use std::io;
+use std::cmp::Ordering::{self, Equal, Greater, Less};
 use std::mem;
-use std::num::Zero;
-use std::num;
 
-fn local_cmp<T:Float>(x: T, y: T) -> Ordering {
+fn local_cmp(x: f64, y: f64) -> Ordering {
     // arbitrarily decide that NaNs are larger than everything.
     if y.is_nan() {
         Less
@@ -33,38 +19,38 @@ fn local_cmp<T:Float>(x: T, y: T) -> Ordering {
     }
 }
 
-fn local_sort<T: Float>(v: &mut [T]) {
-    v.sort_by(|x: &T, y: &T| local_cmp(*x, *y));
+fn local_sort(v: &mut [f64]) {
+    v.sort_by(|x: &f64, y: &f64| local_cmp(*x, *y));
 }
 
 /// Trait that provides simple descriptive statistics on a univariate set of numeric samples.
-pub trait Stats <T: FloatMath + FromPrimitive>{
-
+pub trait Stats {
     /// Sum of the samples.
     ///
     /// Note: this method sacrifices performance at the altar of accuracy
     /// Depends on IEEE-754 arithmetic guarantees. See proof of correctness at:
-    /// ["Adaptive Precision Floating-Point Arithmetic and Fast Robust Geometric Predicates"]
-    /// (http://www.cs.cmu.edu/~quake-papers/robust-arithmetic.ps)
-    /// *Discrete & Computational Geometry 18*, 3 (Oct 1997), 305-363, Shewchuk J.R.
-    fn sum(self) -> T;
+    /// ["Adaptive Precision Floating-Point Arithmetic and Fast Robust Geometric
+    /// Predicates"][paper]
+    ///
+    /// [paper]: http://www.cs.cmu.edu/~quake-papers/robust-arithmetic.ps
+    fn sum(&self) -> f64;
 
     /// Minimum value of the samples.
-    fn min(self) -> T;
+    fn min(&self) -> f64;
 
     /// Maximum value of the samples.
-    fn max(self) -> T;
+    fn max(&self) -> f64;
 
     /// Arithmetic mean (average) of the samples: sum divided by sample-count.
     ///
-    /// See: https://en.wikipedia.org/wiki/Arithmetic_mean
-    fn mean(self) -> T;
+    /// See: <https://en.wikipedia.org/wiki/Arithmetic_mean>
+    fn mean(&self) -> f64;
 
     /// Median of the samples: value separating the lower half of the samples from the higher half.
     /// Equal to `self.percentile(50.0)`.
     ///
-    /// See: https://en.wikipedia.org/wiki/Median
-    fn median(self) -> T;
+    /// See: <https://en.wikipedia.org/wiki/Median>
+    fn median(&self) -> f64;
 
     /// Variance of the samples: bias-corrected mean of the squares of the differences of each
     /// sample from the sample mean. Note that this calculates the _sample variance_ rather than the
@@ -72,22 +58,22 @@ pub trait Stats <T: FloatMath + FromPrimitive>{
     /// bias that would appear if we calculated a population variance, by dividing by `(n-1)` rather
     /// than `n`.
     ///
-    /// See: https://en.wikipedia.org/wiki/Variance
-    fn var(self) -> T;
+    /// See: <https://en.wikipedia.org/wiki/Variance>
+    fn var(&self) -> f64;
 
     /// Standard deviation: the square root of the sample variance.
     ///
     /// Note: this is not a robust statistic for non-normal distributions. Prefer the
     /// `median_abs_dev` for unknown distributions.
     ///
-    /// See: https://en.wikipedia.org/wiki/Standard_deviation
-    fn std_dev(self) -> T;
+    /// See: <https://en.wikipedia.org/wiki/Standard_deviation>
+    fn std_dev(&self) -> f64;
 
     /// Standard deviation as a percent of the mean value. See `std_dev` and `mean`.
     ///
     /// Note: this is not a robust statistic for non-normal distributions. Prefer the
     /// `median_abs_dev_pct` for unknown distributions.
-    fn std_dev_pct(self) -> T;
+    fn std_dev_pct(&self) -> f64;
 
     /// Scaled median of the absolute deviations of each sample from the sample median. This is a
     /// robust (distribution-agnostic) estimator of sample variability. Use this in preference to
@@ -95,11 +81,11 @@ pub trait Stats <T: FloatMath + FromPrimitive>{
     /// by the constant `1.4826` to allow its use as a consistent estimator for the standard
     /// deviation.
     ///
-    /// See: http://en.wikipedia.org/wiki/Median_absolute_deviation
-    fn median_abs_dev(self) -> T;
+    /// See: <http://en.wikipedia.org/wiki/Median_absolute_deviation>
+    fn median_abs_dev(&self) -> f64;
 
     /// Median absolute deviation as a percent of the median. See `median_abs_dev` and `median`.
-    fn median_abs_dev_pct(self) -> T;
+    fn median_abs_dev_pct(&self) -> f64;
 
     /// Percentile: the value below which `pct` percent of the values in `self` fall. For example,
     /// percentile(95.0) will return the value `v` such that 95% of the samples `s` in `self`
@@ -107,46 +93,45 @@ pub trait Stats <T: FloatMath + FromPrimitive>{
     ///
     /// Calculated by linear interpolation between closest ranks.
     ///
-    /// See: http://en.wikipedia.org/wiki/Percentile
-    fn percentile(self, pct: T) -> T;
+    /// See: <http://en.wikipedia.org/wiki/Percentile>
+    fn percentile(&self, pct: f64) -> f64;
 
     /// Quartiles of the sample: three values that divide the sample into four equal groups, each
     /// with 1/4 of the data. The middle value is the median. See `median` and `percentile`. This
     /// function may calculate the 3 quartiles more efficiently than 3 calls to `percentile`, but
     /// is otherwise equivalent.
     ///
-    /// See also: https://en.wikipedia.org/wiki/Quartile
-    fn quartiles(self) -> (T,T,T);
+    /// See also: <https://en.wikipedia.org/wiki/Quartile>
+    fn quartiles(&self) -> (f64, f64, f64);
 
     /// Inter-quartile range: the difference between the 25th percentile (1st quartile) and the 75th
     /// percentile (3rd quartile). See `quartiles`.
     ///
-    /// See also: https://en.wikipedia.org/wiki/Interquartile_range
-    fn iqr(self) -> T;
+    /// See also: <https://en.wikipedia.org/wiki/Interquartile_range>
+    fn iqr(&self) -> f64;
 }
 
 /// Extracted collection of all the summary statistics of a sample set.
-#[deriving(Clone, PartialEq)]
-#[allow(missing_doc)]
-pub struct Summary<T> {
-    pub sum: T,
-    pub min: T,
-    pub max: T,
-    pub mean: T,
-    pub median: T,
-    pub var: T,
-    pub std_dev: T,
-    pub std_dev_pct: T,
-    pub median_abs_dev: T,
-    pub median_abs_dev_pct: T,
-    pub quartiles: (T,T,T),
-    pub iqr: T,
+#[derive(Clone, PartialEq, Copy)]
+#[allow(missing_docs)]
+pub struct Summary {
+    pub sum: f64,
+    pub min: f64,
+    pub max: f64,
+    pub mean: f64,
+    pub median: f64,
+    pub var: f64,
+    pub std_dev: f64,
+    pub std_dev_pct: f64,
+    pub median_abs_dev: f64,
+    pub median_abs_dev_pct: f64,
+    pub quartiles: (f64, f64, f64),
+    pub iqr: f64,
 }
 
-impl<T: FloatMath + FromPrimitive> Summary<T> {
-
+impl Summary {
     /// Construct a new summary of a sample set.
-    pub fn new(samples: &[T]) -> Summary<T> {
+    pub fn new(samples: &[f64]) -> Summary {
         Summary {
             sum: samples.sum(),
             min: samples.min(),
@@ -159,32 +144,32 @@ impl<T: FloatMath + FromPrimitive> Summary<T> {
             median_abs_dev: samples.median_abs_dev(),
             median_abs_dev_pct: samples.median_abs_dev_pct(),
             quartiles: samples.quartiles(),
-            iqr: samples.iqr()
+            iqr: samples.iqr(),
         }
     }
 }
 
-impl<'a, T: FloatMath + FromPrimitive> Stats<T> for &'a [T] {
-
+impl Stats for [f64] {
     // FIXME #11059 handle NaN, inf and overflow
-    fn sum(self) -> T {
+    fn sum(&self) -> f64 {
         let mut partials = vec![];
 
-        for &mut x in self.iter() {
+        for &x in self {
+            let mut x = x;
             let mut j = 0;
             // This inner loop applies `hi`/`lo` summation to each
             // partial so that the list of partial sums remains exact.
-            for i in range(0, partials.len()) {
-                let mut y = partials[i];
-                if num::abs(x) < num::abs(y) {
+            for i in 0..partials.len() {
+                let mut y: f64 = partials[i];
+                if x.abs() < y.abs() {
                     mem::swap(&mut x, &mut y);
                 }
                 // Rounded `x+y` is stored in `hi` with round-off stored in
                 // `lo`. Together `hi+lo` are exactly equal to `x+y`.
                 let hi = x + y;
                 let lo = y - (hi - x);
-                if !lo.is_zero() {
-                    *partials.get_mut(j) = lo;
+                if lo != 0.0 {
+                    partials[j] = lo;
                     j += 1;
                 }
                 x = hi;
@@ -192,138 +177,136 @@ impl<'a, T: FloatMath + FromPrimitive> Stats<T> for &'a [T] {
             if j >= partials.len() {
                 partials.push(x);
             } else {
-                *partials.get_mut(j) = x;
-                partials.truncate(j+1);
+                partials[j] = x;
+                partials.truncate(j + 1);
             }
         }
-        let zero: T = Zero::zero();
+        let zero: f64 = 0.0;
         partials.iter().fold(zero, |p, q| p + *q)
     }
 
-    fn min(self) -> T {
-        assert!(self.len() != 0);
+    fn min(&self) -> f64 {
+        assert!(!self.is_empty());
         self.iter().fold(self[0], |p, q| p.min(*q))
     }
 
-    fn max(self) -> T {
-        assert!(self.len() != 0);
+    fn max(&self) -> f64 {
+        assert!(!self.is_empty());
         self.iter().fold(self[0], |p, q| p.max(*q))
     }
 
-    fn mean(self) -> T {
-        assert!(self.len() != 0);
-        self.sum() / FromPrimitive::from_uint(self.len()).unwrap()
+    fn mean(&self) -> f64 {
+        assert!(!self.is_empty());
+        self.sum() / (self.len() as f64)
     }
 
-    fn median(self) -> T {
-        self.percentile(FromPrimitive::from_uint(50).unwrap())
+    fn median(&self) -> f64 {
+        self.percentile(50 as f64)
     }
 
-    fn var(self) -> T {
+    fn var(&self) -> f64 {
         if self.len() < 2 {
-            Zero::zero()
+            0.0
         } else {
             let mean = self.mean();
-            let mut v: T = Zero::zero();
-            for s in self.iter() {
+            let mut v: f64 = 0.0;
+            for s in self {
                 let x = *s - mean;
-                v = v + x*x;
+                v = v + x * x;
             }
-            // NB: this is _supposed to be_ len-1, not len. If you
+            // N.B., this is _supposed to be_ len-1, not len. If you
             // change it back to len, you will be calculating a
             // population variance, not a sample variance.
-            let denom = FromPrimitive::from_uint(self.len()-1).unwrap();
-            v/denom
+            let denom = (self.len() - 1) as f64;
+            v / denom
         }
     }
 
-    fn std_dev(self) -> T {
+    fn std_dev(&self) -> f64 {
         self.var().sqrt()
     }
 
-    fn std_dev_pct(self) -> T {
-        let hundred = FromPrimitive::from_uint(100).unwrap();
+    fn std_dev_pct(&self) -> f64 {
+        let hundred = 100 as f64;
         (self.std_dev() / self.mean()) * hundred
     }
 
-    fn median_abs_dev(self) -> T {
+    fn median_abs_dev(&self) -> f64 {
         let med = self.median();
-        let abs_devs: Vec<T> = self.iter().map(|&v| num::abs(med - v)).collect();
+        let abs_devs: Vec<f64> = self.iter().map(|&v| (med - v).abs()).collect();
         // This constant is derived by smarter statistics brains than me, but it is
         // consistent with how R and other packages treat the MAD.
-        let number = FromPrimitive::from_f64(1.4826).unwrap();
-        abs_devs.as_slice().median() * number
+        let number = 1.4826;
+        abs_devs.median() * number
     }
 
-    fn median_abs_dev_pct(self) -> T {
-        let hundred = FromPrimitive::from_uint(100).unwrap();
+    fn median_abs_dev_pct(&self) -> f64 {
+        let hundred = 100 as f64;
         (self.median_abs_dev() / self.median()) * hundred
     }
 
-    fn percentile(self, pct: T) -> T {
-        let mut tmp = Vec::from_slice(self);
-        local_sort(tmp.as_mut_slice());
-        percentile_of_sorted(tmp.as_slice(), pct)
+    fn percentile(&self, pct: f64) -> f64 {
+        let mut tmp = self.to_vec();
+        local_sort(&mut tmp);
+        percentile_of_sorted(&tmp, pct)
     }
 
-    fn quartiles(self) -> (T,T,T) {
-        let mut tmp = Vec::from_slice(self);
-        local_sort(tmp.as_mut_slice());
-        let first = FromPrimitive::from_uint(25).unwrap();
-        let a = percentile_of_sorted(tmp.as_slice(), first);
-        let secound = FromPrimitive::from_uint(50).unwrap();
-        let b = percentile_of_sorted(tmp.as_slice(), secound);
-        let third = FromPrimitive::from_uint(75).unwrap();
-        let c = percentile_of_sorted(tmp.as_slice(), third);
-        (a,b,c)
+    fn quartiles(&self) -> (f64, f64, f64) {
+        let mut tmp = self.to_vec();
+        local_sort(&mut tmp);
+        let first = 25f64;
+        let a = percentile_of_sorted(&tmp, first);
+        let second = 50f64;
+        let b = percentile_of_sorted(&tmp, second);
+        let third = 75f64;
+        let c = percentile_of_sorted(&tmp, third);
+        (a, b, c)
     }
 
-    fn iqr(self) -> T {
-        let (a,_,c) = self.quartiles();
+    fn iqr(&self) -> f64 {
+        let (a, _, c) = self.quartiles();
         c - a
     }
 }
 
-
 // Helper function: extract a value representing the `pct` percentile of a sorted sample-set, using
 // linear interpolation. If samples are not sorted, return nonsensical value.
-fn percentile_of_sorted<T: Float + FromPrimitive>(sorted_samples: &[T],
-                                                             pct: T) -> T {
-    assert!(sorted_samples.len() != 0);
+fn percentile_of_sorted(sorted_samples: &[f64], pct: f64) -> f64 {
+    assert!(!sorted_samples.is_empty());
     if sorted_samples.len() == 1 {
         return sorted_samples[0];
     }
-    let zero: T = Zero::zero();
+    let zero: f64 = 0.0;
     assert!(zero <= pct);
-    let hundred = FromPrimitive::from_uint(100).unwrap();
+    let hundred = 100f64;
     assert!(pct <= hundred);
     if pct == hundred {
         return sorted_samples[sorted_samples.len() - 1];
     }
-    let length = FromPrimitive::from_uint(sorted_samples.len() - 1).unwrap();
+    let length = (sorted_samples.len() - 1) as f64;
     let rank = (pct / hundred) * length;
     let lrank = rank.floor();
     let d = rank - lrank;
-    let n = lrank.to_uint().unwrap();
+    let n = lrank as usize;
     let lo = sorted_samples[n];
-    let hi = sorted_samples[n+1];
+    let hi = sorted_samples[n + 1];
     lo + (hi - lo) * d
 }
 
-
-/// Winsorize a set of samples, replacing values above the `100-pct` percentile and below the `pct`
-/// percentile with those percentiles themselves. This is a way of minimizing the effect of
-/// outliers, at the cost of biasing the sample. It differs from trimming in that it does not
-/// change the number of samples, just changes the values of those that are outliers.
+/// Winsorize a set of samples, replacing values above the `100-pct` percentile
+/// and below the `pct` percentile with those percentiles themselves. This is a
+/// way of minimizing the effect of outliers, at the cost of biasing the sample.
+/// It differs from trimming in that it does not change the number of samples,
+/// just changes the values of those that are outliers.
 ///
-/// See: http://en.wikipedia.org/wiki/Winsorising
-pub fn winsorize<T: Float + FromPrimitive>(samples: &mut [T], pct: T) {
-    let mut tmp = Vec::from_slice(samples);
-    local_sort(tmp.as_mut_slice());
-    let lo = percentile_of_sorted(tmp.as_slice(), pct);
-    let hundred: T = FromPrimitive::from_uint(100).unwrap();
-    let hi = percentile_of_sorted(tmp.as_slice(), hundred-pct);
-    for samp in samples.mut_iter() {
+/// See: <http://en.wikipedia.org/wiki/Winsorising>
+pub fn winsorize(samples: &mut [f64], pct: f64) {
+    let mut tmp = samples.to_vec();
+    local_sort(&mut tmp);
+    let lo = percentile_of_sorted(&tmp, pct);
+    let hundred = 100 as f64;
+    let hi = percentile_of_sorted(&tmp, hundred - pct);
+    for samp in samples {
         if *samp > hi {
             *samp = hi
         } else if *samp < lo {
@@ -332,151 +315,33 @@ pub fn winsorize<T: Float + FromPrimitive>(samples: &mut [T], pct: T) {
     }
 }
 
-/// Render writes the min, max and quartiles of the provided `Summary` to the provided `Writer`.
-pub fn write_5_number_summary<T: Float + Show>(w: &mut io::Writer,
-                                               s: &Summary<T>) -> io::IoResult<()> {
-    let (q1,q2,q3) = s.quartiles;
-    write!(w, "(min={}, q1={}, med={}, q3={}, max={})",
-                     s.min,
-                     q1,
-                     q2,
-                     q3,
-                     s.max)
-}
-
-/// Render a boxplot to the provided writer. The boxplot shows the min, max and quartiles of the
-/// provided `Summary` (thus includes the mean) and is scaled to display within the range of the
-/// nearest multiple-of-a-power-of-ten above and below the min and max of possible values, and
-/// target `width_hint` characters of display (though it will be wider if necessary).
-///
-/// As an example, the summary with 5-number-summary `(min=15, q1=17, med=20, q3=24, max=31)` might
-/// display as:
-///
-/// ~~~~ignore
-///   10 |        [--****#******----------]          | 40
-/// ~~~~
-
-pub fn write_boxplot<T: Float + Show + FromPrimitive>(
-                     w: &mut io::Writer,
-                     s: &Summary<T>,
-                     width_hint: uint)
-                      -> io::IoResult<()> {
-
-    let (q1,q2,q3) = s.quartiles;
-
-    // the .abs() handles the case where numbers are negative
-    let ten: T = FromPrimitive::from_uint(10).unwrap();
-    let lomag = ten.powf(s.min.abs().log10().floor());
-    let himag = ten.powf(s.max.abs().log10().floor());
-
-    // need to consider when the limit is zero
-    let zero: T = Zero::zero();
-    let lo = if lomag.is_zero() {
-        zero
-    } else {
-        (s.min / lomag).floor() * lomag
-    };
-
-    let hi = if himag.is_zero() {
-        zero
-    } else {
-        (s.max / himag).ceil() * himag
-    };
-
-    let range = hi - lo;
-
-    let lostr = lo.to_string();
-    let histr = hi.to_string();
-
-    let overhead_width = lostr.len() + histr.len() + 4;
-    let range_width = width_hint - overhead_width;
-    let range_float = FromPrimitive::from_uint(range_width).unwrap();
-    let char_step = range / range_float;
-
-    try!(write!(w, "{} |", lostr));
-
-    let mut c = 0;
-    let mut v = lo;
-
-    while c < range_width && v < s.min {
-        try!(write!(w, " "));
-        v = v + char_step;
-        c += 1;
-    }
-    try!(write!(w, "["));
-    c += 1;
-    while c < range_width && v < q1 {
-        try!(write!(w, "-"));
-        v = v + char_step;
-        c += 1;
-    }
-    while c < range_width && v < q2 {
-        try!(write!(w, "*"));
-        v = v + char_step;
-        c += 1;
-    }
-    try!(write!(w, "#"));
-    c += 1;
-    while c < range_width && v < q3 {
-        try!(write!(w, "*"));
-        v = v + char_step;
-        c += 1;
-    }
-    while c < range_width && v < s.max {
-        try!(write!(w, "-"));
-        v = v + char_step;
-        c += 1;
-    }
-    try!(write!(w, "]"));
-    while c < range_width {
-        try!(write!(w, " "));
-        v = v + char_step;
-        c += 1;
-    }
-
-    try!(write!(w, "| {}", histr));
-    Ok(())
-}
-
-/// Returns a HashMap with the number of occurrences of every element in the
-/// sequence that the iterator exposes.
-pub fn freq_count<T: Iterator<U>, U: Eq+Hash>(mut iter: T) -> hashmap::HashMap<U, uint> {
-    let mut map: hashmap::HashMap<U,uint> = hashmap::HashMap::new();
-    for elem in iter {
-        map.insert_or_update_with(elem, 1, |_, count| *count += 1);
-    }
-    map
-}
-
 // Test vectors generated from R, using the script src/etc/stat-test-vectors.r.
 
 #[cfg(test)]
 mod tests {
-    use stats::Stats;
-    use stats::Summary;
-    use stats::write_5_number_summary;
-    use stats::write_boxplot;
-    use std::io;
+    use crate::stats::Stats;
+    use crate::stats::Summary;
     use std::f64;
+    use std::io::prelude::*;
+    use std::io;
 
-    macro_rules! assert_approx_eq(
-        ($a:expr, $b:expr) => ({
+    macro_rules! assert_approx_eq {
+        ($a: expr, $b: expr) => {{
             let (a, b) = (&$a, &$b);
-            assert!((*a - *b).abs() < 1.0e-6,
-                    "{} is not approximately equal to {}", *a, *b);
-        })
-    )
+            assert!(
+                (*a - *b).abs() < 1.0e-6,
+                "{} is not approximately equal to {}",
+                *a,
+                *b
+            );
+        }};
+    }
 
-    fn check(samples: &[f64], summ: &Summary<f64>) {
-
+    fn check(samples: &[f64], summ: &Summary) {
         let summ2 = Summary::new(samples);
 
-        let mut w = io::stdout();
-        let w = &mut w as &mut io::Writer;
-        (write!(w, "\n")).unwrap();
-        write_5_number_summary(w, &summ2).unwrap();
-        (write!(w, "\n")).unwrap();
-        write_boxplot(w, &summ2, 50).unwrap();
+        let mut w = io::sink();
+        let w = &mut w;
         (write!(w, "\n")).unwrap();
 
         assert_eq!(summ.sum, summ2.sum);
@@ -507,10 +372,7 @@ mod tests {
 
     #[test]
     fn test_norm2() {
-        let val = &[
-            958.0000000000,
-            924.0000000000,
-        ];
+        let val = &[958.0000000000, 924.0000000000];
         let summ = &Summary {
             sum: 1882.0000000000,
             min: 924.0000000000,
@@ -522,7 +384,7 @@ mod tests {
             std_dev_pct: 2.5549022912,
             median_abs_dev: 25.2042000000,
             median_abs_dev_pct: 2.6784484591,
-            quartiles: (932.5000000000,941.0000000000,949.5000000000),
+            quartiles: (932.5000000000, 941.0000000000, 949.5000000000),
             iqr: 17.0000000000,
         };
         check(val, summ);
@@ -552,7 +414,7 @@ mod tests {
             std_dev_pct: 12.6742097933,
             median_abs_dev: 102.2994000000,
             median_abs_dev_pct: 10.5408964451,
-            quartiles: (956.7500000000,970.5000000000,1078.7500000000),
+            quartiles: (956.7500000000, 970.5000000000, 1078.7500000000),
             iqr: 122.0000000000,
         };
         check(val, summ);
@@ -582,7 +444,7 @@ mod tests {
             std_dev_pct: 25.4846418487,
             median_abs_dev: 195.7032000000,
             median_abs_dev_pct: 21.4704552935,
-            quartiles: (771.0000000000,911.5000000000,1017.2500000000),
+            quartiles: (771.0000000000, 911.5000000000, 1017.2500000000),
             iqr: 246.2500000000,
         };
         check(val, summ);
@@ -612,7 +474,7 @@ mod tests {
             std_dev_pct: 52.3146817750,
             median_abs_dev: 611.5725000000,
             median_abs_dev_pct: 66.9482758621,
-            quartiles: (567.2500000000,913.5000000000,1331.2500000000),
+            quartiles: (567.2500000000, 913.5000000000, 1331.2500000000),
             iqr: 764.0000000000,
         };
         check(val, summ);
@@ -657,7 +519,7 @@ mod tests {
             std_dev_pct: 1.9888308788,
             median_abs_dev: 22.2390000000,
             median_abs_dev_pct: 2.2283567134,
-            quartiles: (983.0000000000,998.0000000000,1013.0000000000),
+            quartiles: (983.0000000000, 998.0000000000, 1013.0000000000),
             iqr: 30.0000000000,
         };
         check(val, summ);
@@ -687,7 +549,7 @@ mod tests {
             std_dev_pct: 101.5828843560,
             median_abs_dev: 13.3434000000,
             median_abs_dev_pct: 116.0295652174,
-            quartiles: (4.2500000000,11.5000000000,22.5000000000),
+            quartiles: (4.2500000000, 11.5000000000, 22.5000000000),
             iqr: 18.2500000000,
         };
         check(val, summ);
@@ -717,7 +579,7 @@ mod tests {
             std_dev_pct: 74.4671410520,
             median_abs_dev: 22.9803000000,
             median_abs_dev_pct: 93.7971428571,
-            quartiles: (9.5000000000,24.5000000000,36.5000000000),
+            quartiles: (9.5000000000, 24.5000000000, 36.5000000000),
             iqr: 27.0000000000,
         };
         check(val, summ);
@@ -747,7 +609,7 @@ mod tests {
             std_dev_pct: 88.4507754589,
             median_abs_dev: 21.4977000000,
             median_abs_dev_pct: 97.7168181818,
-            quartiles: (7.7500000000,22.0000000000,35.0000000000),
+            quartiles: (7.7500000000, 22.0000000000, 35.0000000000),
             iqr: 27.2500000000,
         };
         check(val, summ);
@@ -792,7 +654,7 @@ mod tests {
             std_dev_pct: 103.3565983562,
             median_abs_dev: 19.2738000000,
             median_abs_dev_pct: 101.4410526316,
-            quartiles: (6.0000000000,19.0000000000,31.0000000000),
+            quartiles: (6.0000000000, 19.0000000000, 31.0000000000),
             iqr: 25.0000000000,
         };
         check(val, summ);
@@ -837,7 +699,7 @@ mod tests {
             std_dev_pct: 22.2037202539,
             median_abs_dev: 5.9304000000,
             median_abs_dev_pct: 29.6520000000,
-            quartiles: (17.0000000000,20.0000000000,24.0000000000),
+            quartiles: (17.0000000000, 20.0000000000, 24.0000000000),
             iqr: 7.0000000000,
         };
         check(val, summ);
@@ -882,7 +744,7 @@ mod tests {
             std_dev_pct: 16.3814245145,
             median_abs_dev: 5.9304000000,
             median_abs_dev_pct: 18.5325000000,
-            quartiles: (28.0000000000,32.0000000000,34.0000000000),
+            quartiles: (28.0000000000, 32.0000000000, 34.0000000000),
             iqr: 6.0000000000,
         };
         check(val, summ);
@@ -927,7 +789,7 @@ mod tests {
             std_dev_pct: 14.3978417577,
             median_abs_dev: 5.9304000000,
             median_abs_dev_pct: 14.1200000000,
-            quartiles: (37.0000000000,42.0000000000,45.0000000000),
+            quartiles: (37.0000000000, 42.0000000000, 45.0000000000),
             iqr: 8.0000000000,
         };
         check(val, summ);
@@ -972,7 +834,7 @@ mod tests {
             std_dev_pct: 11.3913245723,
             median_abs_dev: 4.4478000000,
             median_abs_dev_pct: 8.8956000000,
-            quartiles: (44.0000000000,50.0000000000,52.0000000000),
+            quartiles: (44.0000000000, 50.0000000000, 52.0000000000),
             iqr: 8.0000000000,
         };
         check(val, summ);
@@ -1017,30 +879,12 @@ mod tests {
             std_dev_pct: 64.1488719719,
             median_abs_dev: 45.9606000000,
             median_abs_dev_pct: 102.1346666667,
-            quartiles: (29.0000000000,45.0000000000,79.0000000000),
+            quartiles: (29.0000000000, 45.0000000000, 79.0000000000),
             iqr: 50.0000000000,
         };
         check(val, summ);
     }
 
-    #[test]
-    fn test_boxplot_nonpositive() {
-        fn t(s: &Summary<f64>, expected: String) {
-            use std::io::MemWriter;
-            let mut m = MemWriter::new();
-            write_boxplot(&mut m as &mut io::Writer, s, 30).unwrap();
-            let out = String::from_utf8(m.unwrap()).unwrap();
-            assert_eq!(out, expected);
-        }
-
-        t(&Summary::new([-2.0f64, -1.0f64]),
-                        "-2 |[------******#*****---]| -1".to_string());
-        t(&Summary::new([0.0f64, 2.0f64]),
-                        "0 |[-------*****#*******---]| 2".to_string());
-        t(&Summary::new([-2.0f64, 0.0f64]),
-                        "-2 |[------******#******---]| 0".to_string());
-
-    }
     #[test]
     fn test_sum_f64s() {
         assert_eq!([0.5f64, 3.2321f64, 1.5678f64].sum(), 5.2999);
@@ -1053,8 +897,9 @@ mod tests {
 
 #[cfg(test)]
 mod bench {
-    use Bencher;
-    use stats::Stats;
+    extern crate test;
+    use self::test::Bencher;
+    use crate::stats::Stats;
 
     #[bench]
     pub fn sum_three_items(b: &mut Bencher) {
@@ -1065,10 +910,13 @@ mod bench {
     #[bench]
     pub fn sum_many_f64(b: &mut Bencher) {
         let nums = [-1e30f64, 1e60, 1e30, 1.0, -1e60];
-        let v = Vec::from_fn(500, |i| nums[i%5]);
+        let v = (0..500).map(|i| nums[i % 5]).collect::<Vec<_>>();
 
         b.iter(|| {
-            v.as_slice().sum();
+            v.sum();
         })
     }
+
+    #[bench]
+    pub fn no_iter(_: &mut Bencher) {}
 }

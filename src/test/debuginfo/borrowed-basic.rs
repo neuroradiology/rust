@@ -1,25 +1,12 @@
-// Copyright 2013-2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-// ignore-android: FIXME(#10381)
-
 // Gdb doesn't know about UTF-32 character encoding and will print a rust char as only
 // its numerical value.
 
 // compile-flags:-g
+// min-lldb-version: 310
 
 // === GDB TESTS ===================================================================================
 
-// gdb-command:rbreak zzz
 // gdb-command:run
-// gdb-command:finish
 // gdb-command:print *bool_ref
 // gdb-check:$1 = true
 
@@ -27,10 +14,12 @@
 // gdb-check:$2 = -1
 
 // gdb-command:print *char_ref
-// gdb-check:$3 = 97
+// gdbg-check:$3 = 97
+// gdbr-check:$3 = 97 'a'
 
 // gdb-command:print *i8_ref
-// gdb-check:$4 = 68 'D'
+// gdbg-check:$4 = 68 'D'
+// gdbr-check:$4 = 68
 
 // gdb-command:print *i16_ref
 // gdb-check:$5 = -16
@@ -45,7 +34,8 @@
 // gdb-check:$8 = 1
 
 // gdb-command:print *u8_ref
-// gdb-check:$9 = 100 'd'
+// gdbg-check:$9 = 100 'd'
+// gdbr-check:$9 = 100
 
 // gdb-command:print *u16_ref
 // gdb-check:$10 = 16
@@ -67,56 +57,71 @@
 
 // lldb-command:run
 // lldb-command:print *bool_ref
-// lldb-check:[...]$0 = true
+// lldbg-check:[...]$0 = true
+// lldbr-check:(bool) *bool_ref = true
 
 // lldb-command:print *int_ref
-// lldb-check:[...]$1 = -1
+// lldbg-check:[...]$1 = -1
+// lldbr-check:(isize) *int_ref = -1
 
-// NOTE: lldb doesn't support 32bit chars at the moment
-// d ebugger:print *char_ref
-// c heck:[...]$x = 97
+// NOTE: only rust-enabled lldb supports 32bit chars
+// lldbr-command:print *char_ref
+// lldbr-check:(char) *char_ref = 'a'
 
 // lldb-command:print *i8_ref
-// lldb-check:[...]$2 = 'D'
+// lldbg-check:[...]$2 = 'D'
+// lldbr-check:(i8) *i8_ref = 68
 
 // lldb-command:print *i16_ref
-// lldb-check:[...]$3 = -16
+// lldbg-check:[...]$3 = -16
+// lldbr-check:(i16) *i16_ref = -16
 
 // lldb-command:print *i32_ref
-// lldb-check:[...]$4 = -32
+// lldbg-check:[...]$4 = -32
+// lldbr-check:(i32) *i32_ref = -32
 
 // lldb-command:print *i64_ref
-// lldb-check:[...]$5 = -64
+// lldbg-check:[...]$5 = -64
+// lldbr-check:(i64) *i64_ref = -64
 
 // lldb-command:print *uint_ref
-// lldb-check:[...]$6 = 1
+// lldbg-check:[...]$6 = 1
+// lldbr-check:(usize) *uint_ref = 1
 
 // lldb-command:print *u8_ref
-// lldb-check:[...]$7 = 'd'
+// lldbg-check:[...]$7 = 'd'
+// lldbr-check:(u8) *u8_ref = 100
 
 // lldb-command:print *u16_ref
-// lldb-check:[...]$8 = 16
+// lldbg-check:[...]$8 = 16
+// lldbr-check:(u16) *u16_ref = 16
 
 // lldb-command:print *u32_ref
-// lldb-check:[...]$9 = 32
+// lldbg-check:[...]$9 = 32
+// lldbr-check:(u32) *u32_ref = 32
 
 // lldb-command:print *u64_ref
-// lldb-check:[...]$10 = 64
+// lldbg-check:[...]$10 = 64
+// lldbr-check:(u64) *u64_ref = 64
 
 // lldb-command:print *f32_ref
-// lldb-check:[...]$11 = 2.5
+// lldbg-check:[...]$11 = 2.5
+// lldbr-check:(f32) *f32_ref = 2.5
 
 // lldb-command:print *f64_ref
-// lldb-check:[...]$12 = 3.5
+// lldbg-check:[...]$12 = 3.5
+// lldbr-check:(f64) *f64_ref = 3.5
 
-#![allow(unused_variable)]
+#![allow(unused_variables)]
+#![feature(omit_gdb_pretty_printer_section)]
+#![omit_gdb_pretty_printer_section]
 
 fn main() {
     let bool_val: bool = true;
     let bool_ref: &bool = &bool_val;
 
-    let int_val: int = -1;
-    let int_ref: &int = &int_val;
+    let int_val: isize = -1;
+    let int_ref: &isize = &int_val;
 
     let char_val: char = 'a';
     let char_ref: &char = &char_val;
@@ -130,11 +135,11 @@ fn main() {
     let i32_val: i32 = -32;
     let i32_ref: &i32 = &i32_val;
 
-    let uint_val: i64 = -64;
-    let i64_ref: &i64 = &uint_val;
+    let i64_val: i64 = -64;
+    let i64_ref: &i64 = &i64_val;
 
-    let uint_val: uint = 1;
-    let uint_ref: &uint = &uint_val;
+    let uint_val: usize = 1;
+    let uint_ref: &usize = &uint_val;
 
     let u8_val: u8 = 100;
     let u8_ref: &u8 = &u8_val;

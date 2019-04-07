@@ -1,47 +1,36 @@
-// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-
 fn test_int() {
-    fn f() -> int { 10 }
+    fn f() -> isize { 10 }
     assert_eq!(f(), 10);
 }
 
 fn test_vec() {
-    fn f() -> Vec<int> { vec!(10, 11) }
+    fn f() -> Vec<isize> { vec![10, 11] }
     let vect = f();
-    assert_eq!(*vect.get(1), 11);
+    assert_eq!(vect[1], 11);
 }
 
 fn test_generic() {
     fn f<T>(t: T) -> T { t }
-    assert_eq!(f(10i), 10);
+    assert_eq!(f(10), 10);
 }
 
 fn test_alt() {
-    fn f() -> int { match true { false => { 10 } true => { 20 } } }
+    fn f() -> isize { match true { false => { 10 } true => { 20 } } }
     assert_eq!(f(), 20);
 }
 
 fn test_if() {
-    fn f() -> int { if true { 10 } else { 20 } }
+    fn f() -> isize { if true { 10 } else { 20 } }
     assert_eq!(f(), 10);
 }
 
 fn test_block() {
-    fn f() -> int { { 10 } }
+    fn f() -> isize { { 10 } }
     assert_eq!(f(), 10);
 }
 
 fn test_ret() {
-    fn f() -> int {
+    fn f() -> isize {
         return 10 // no semi
 
     }
@@ -51,7 +40,7 @@ fn test_ret() {
 
 // From issue #372
 fn test_372() {
-    fn f() -> int { let x = { 3 }; x }
+    fn f() -> isize { let x = { 3 }; x }
     assert_eq!(f(), 3);
 }
 

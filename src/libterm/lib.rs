@@ -1,36 +1,28 @@
-// Copyright 2013-2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! Terminal formatting library.
 //!
 //! This crate provides the `Terminal` trait, which abstracts over an [ANSI
-//! Terminal][ansi] to provide color printing, among other things. There are two implementations,
-//! the `TerminfoTerminal`, which uses control characters from a
-//! [terminfo][ti] database, and `WinConsole`, which uses the [Win32 Console
+//! Terminal][ansi] to provide color printing, among other things. There are two
+//! implementations, the `TerminfoTerminal`, which uses control characters from
+//! a [terminfo][ti] database, and `WinConsole`, which uses the [Win32 Console
 //! API][win].
 //!
-//! ## Example
+//! # Examples
 //!
 //! ```no_run
+//! # #![feature(rustc_private)]
 //! extern crate term;
+//! use std::io::prelude::*;
 //!
 //! fn main() {
 //!     let mut t = term::stdout().unwrap();
 //!
 //!     t.fg(term::color::GREEN).unwrap();
-//!     (write!(t, "hello, ")).unwrap();
+//!     write!(t, "hello, ").unwrap();
 //!
 //!     t.fg(term::color::RED).unwrap();
-//!     (writeln!(t, "world!")).unwrap();
+//!     writeln!(t, "world!").unwrap();
 //!
-//!     t.reset().unwrap();
+//!     assert!(t.reset().unwrap());
 //! }
 //! ```
 //!
@@ -38,178 +30,127 @@
 //! [win]: http://msdn.microsoft.com/en-us/library/windows/desktop/ms682010%28v=vs.85%29.aspx
 //! [ti]: https://en.wikipedia.org/wiki/Terminfo
 
-#![crate_name = "term"]
-#![experimental]
-#![comment = "Simple ANSI color library"]
-#![license = "MIT/ASL2"]
-#![crate_type = "rlib"]
-#![crate_type = "dylib"]
-#![doc(html_logo_url = "http://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
-       html_favicon_url = "http://www.rust-lang.org/favicon.ico",
-       html_root_url = "http://doc.rust-lang.org/master/",
-       html_playground_url = "http://play.rust-lang.org/")]
+#![doc(html_root_url = "https://doc.rust-lang.org/nightly/",
+       html_playground_url = "https://play.rust-lang.org/",
+       test(attr(deny(warnings))))]
+#![deny(missing_docs)]
 
-#![feature(macro_rules, phase)]
+#![deny(rust_2018_idioms)]
 
-#![deny(missing_doc)]
+#![cfg_attr(windows, feature(libc))]
+// Handle rustfmt skips
+#![feature(custom_attribute)]
+#![allow(unused_attributes)]
 
-#[phase(plugin, link)] extern crate log;
+use std::io::prelude::*;
+use std::io::{self, Stdout, Stderr};
 
 pub use terminfo::TerminfoTerminal;
 #[cfg(windows)]
 pub use win::WinConsole;
-
-use std::io::IoResult;
 
 pub mod terminfo;
 
 #[cfg(windows)]
 mod win;
 
-/// A hack to work around the fact that `Box<Writer + Send>` does not
-/// currently implement `Writer`.
-pub struct WriterWrapper {
-    wrapped: Box<Writer + Send>,
-}
-
-impl Writer for WriterWrapper {
-    #[inline]
-    fn write(&mut self, buf: &[u8]) -> IoResult<()> {
-        self.wrapped.write(buf)
-    }
-
-    #[inline]
-    fn flush(&mut self) -> IoResult<()> {
-        self.wrapped.flush()
-    }
-}
+/// Alias for stdout terminals.
+pub type StdoutTerminal = dyn Terminal<Output = Stdout> + Send;
+/// Alias for stderr terminals.
+pub type StderrTerminal = dyn Terminal<Output = Stderr> + Send;
 
 #[cfg(not(windows))]
-/// Return a Terminal wrapping stdout, or None if a terminal couldn't be
+/// Returns a Terminal wrapping stdout, or None if a terminal couldn't be
 /// opened.
-pub fn stdout() -> Option<Box<Terminal<WriterWrapper> + Send>> {
-    let ti: Option<TerminfoTerminal<WriterWrapper>>
-        = Terminal::new(WriterWrapper {
-            wrapped: box std::io::stdout() as Box<Writer + Send>,
-        });
-    ti.map(|t| box t as Box<Terminal<WriterWrapper> + Send>)
+pub fn stdout() -> Option<Box<StdoutTerminal>> {
+    TerminfoTerminal::new(io::stdout()).map(|t| Box::new(t) as Box<StdoutTerminal>)
 }
 
 #[cfg(windows)]
-/// Return a Terminal wrapping stdout, or None if a terminal couldn't be
+/// Returns a Terminal wrapping stdout, or None if a terminal couldn't be
 /// opened.
-pub fn stdout() -> Option<Box<Terminal<WriterWrapper> + Send>> {
-    let ti: Option<TerminfoTerminal<WriterWrapper>>
-        = Terminal::new(WriterWrapper {
-            wrapped: box std::io::stdout() as Box<Writer + Send>,
-        });
-
-    match ti {
-        Some(t) => Some(box t as Box<Terminal<WriterWrapper> + Send>),
-        None => {
-            let wc: Option<WinConsole<WriterWrapper>>
-                = Terminal::new(WriterWrapper {
-                    wrapped: box std::io::stdout() as Box<Writer + Send>,
-                });
-            wc.map(|w| box w as Box<Terminal<WriterWrapper> + Send>)
-        }
-    }
+pub fn stdout() -> Option<Box<StdoutTerminal>> {
+    TerminfoTerminal::new(io::stdout())
+        .map(|t| Box::new(t) as Box<StdoutTerminal>)
+        .or_else(|| WinConsole::new(io::stdout()).ok().map(|t| Box::new(t) as Box<StdoutTerminal>))
 }
 
 #[cfg(not(windows))]
-/// Return a Terminal wrapping stderr, or None if a terminal couldn't be
+/// Returns a Terminal wrapping stderr, or None if a terminal couldn't be
 /// opened.
-pub fn stderr() -> Option<Box<Terminal<WriterWrapper> + Send> + Send> {
-    let ti: Option<TerminfoTerminal<WriterWrapper>>
-        = Terminal::new(WriterWrapper {
-            wrapped: box std::io::stderr() as Box<Writer + Send>,
-        });
-    ti.map(|t| box t as Box<Terminal<WriterWrapper> + Send>)
+pub fn stderr() -> Option<Box<StderrTerminal>> {
+    TerminfoTerminal::new(io::stderr()).map(|t| Box::new(t) as Box<StderrTerminal>)
 }
 
 #[cfg(windows)]
-/// Return a Terminal wrapping stderr, or None if a terminal couldn't be
+/// Returns a Terminal wrapping stderr, or None if a terminal couldn't be
 /// opened.
-pub fn stderr() -> Option<Box<Terminal<WriterWrapper> + Send> + Send> {
-    let ti: Option<TerminfoTerminal<WriterWrapper>>
-        = Terminal::new(WriterWrapper {
-            wrapped: box std::io::stderr() as Box<Writer + Send>,
-        });
-
-    match ti {
-        Some(t) => Some(box t as Box<Terminal<WriterWrapper> + Send>),
-        None => {
-            let wc: Option<WinConsole<WriterWrapper>>
-                = Terminal::new(WriterWrapper {
-                    wrapped: box std::io::stderr() as Box<Writer + Send>,
-                });
-            wc.map(|w| box w as Box<Terminal<WriterWrapper> + Send>)
-        }
-    }
+pub fn stderr() -> Option<Box<StderrTerminal>> {
+    TerminfoTerminal::new(io::stderr())
+        .map(|t| Box::new(t) as Box<StderrTerminal>)
+        .or_else(|| WinConsole::new(io::stderr()).ok().map(|t| Box::new(t) as Box<StderrTerminal>))
 }
 
 
 /// Terminal color definitions
+#[allow(missing_docs)]
 pub mod color {
     /// Number for a terminal color
     pub type Color = u16;
 
-    pub static BLACK:   Color = 0u16;
-    pub static RED:     Color = 1u16;
-    pub static GREEN:   Color = 2u16;
-    pub static YELLOW:  Color = 3u16;
-    pub static BLUE:    Color = 4u16;
-    pub static MAGENTA: Color = 5u16;
-    pub static CYAN:    Color = 6u16;
-    pub static WHITE:   Color = 7u16;
+    pub const BLACK: Color = 0;
+    pub const RED: Color = 1;
+    pub const GREEN: Color = 2;
+    pub const YELLOW: Color = 3;
+    pub const BLUE: Color = 4;
+    pub const MAGENTA: Color = 5;
+    pub const CYAN: Color = 6;
+    pub const WHITE: Color = 7;
 
-    pub static BRIGHT_BLACK:   Color = 8u16;
-    pub static BRIGHT_RED:     Color = 9u16;
-    pub static BRIGHT_GREEN:   Color = 10u16;
-    pub static BRIGHT_YELLOW:  Color = 11u16;
-    pub static BRIGHT_BLUE:    Color = 12u16;
-    pub static BRIGHT_MAGENTA: Color = 13u16;
-    pub static BRIGHT_CYAN:    Color = 14u16;
-    pub static BRIGHT_WHITE:   Color = 15u16;
+    pub const BRIGHT_BLACK: Color = 8;
+    pub const BRIGHT_RED: Color = 9;
+    pub const BRIGHT_GREEN: Color = 10;
+    pub const BRIGHT_YELLOW: Color = 11;
+    pub const BRIGHT_BLUE: Color = 12;
+    pub const BRIGHT_MAGENTA: Color = 13;
+    pub const BRIGHT_CYAN: Color = 14;
+    pub const BRIGHT_WHITE: Color = 15;
 }
 
-/// Terminal attributes
-pub mod attr {
-    /// Terminal attributes for use with term.attr().
-    ///
-    /// Most attributes can only be turned on and must be turned off with term.reset().
-    /// The ones that can be turned off explicitly take a boolean value.
-    /// Color is also represented as an attribute for convenience.
-    pub enum Attr {
-        /// Bold (or possibly bright) mode
-        Bold,
-        /// Dim mode, also called faint or half-bright. Often not supported
-        Dim,
-        /// Italics mode. Often not supported
-        Italic(bool),
-        /// Underline mode
-        Underline(bool),
-        /// Blink mode
-        Blink,
-        /// Standout mode. Often implemented as Reverse, sometimes coupled with Bold
-        Standout(bool),
-        /// Reverse mode, inverts the foreground and background colors
-        Reverse,
-        /// Secure mode, also called invis mode. Hides the printed text
-        Secure,
-        /// Convenience attribute to set the foreground color
-        ForegroundColor(super::color::Color),
-        /// Convenience attribute to set the background color
-        BackgroundColor(super::color::Color)
-    }
+/// Terminal attributes for use with term.attr().
+///
+/// Most attributes can only be turned on and must be turned off with term.reset().
+/// The ones that can be turned off explicitly take a boolean value.
+/// Color is also represented as an attribute for convenience.
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+pub enum Attr {
+    /// Bold (or possibly bright) mode
+    Bold,
+    /// Dim mode, also called faint or half-bright. Often not supported
+    Dim,
+    /// Italics mode. Often not supported
+    Italic(bool),
+    /// Underline mode
+    Underline(bool),
+    /// Blink mode
+    Blink,
+    /// Standout mode. Often implemented as Reverse, sometimes coupled with Bold
+    Standout(bool),
+    /// Reverse mode, inverts the foreground and background colors
+    Reverse,
+    /// Secure mode, also called invis mode. Hides the printed text
+    Secure,
+    /// Convenience attribute to set the foreground color
+    ForegroundColor(color::Color),
+    /// Convenience attribute to set the background color
+    BackgroundColor(color::Color),
 }
 
 /// A terminal with similar capabilities to an ANSI Terminal
 /// (foreground/background colors etc).
-pub trait Terminal<T: Writer>: Writer {
-    /// Returns `None` whenever the terminal cannot be created for some
-    /// reason.
-    fn new(out: T) -> Option<Self>;
+pub trait Terminal: Write {
+    /// The terminal's output writer type.
+    type Output: Write;
 
     /// Sets the foreground color to the given color.
     ///
@@ -218,7 +159,7 @@ pub trait Terminal<T: Writer>: Writer {
     ///
     /// Returns `Ok(true)` if the color was set, `Ok(false)` otherwise, and `Err(e)`
     /// if there was an I/O error.
-    fn fg(&mut self, color: color::Color) -> IoResult<bool>;
+    fn fg(&mut self, color: color::Color) -> io::Result<bool>;
 
     /// Sets the background color to the given color.
     ///
@@ -227,26 +168,34 @@ pub trait Terminal<T: Writer>: Writer {
     ///
     /// Returns `Ok(true)` if the color was set, `Ok(false)` otherwise, and `Err(e)`
     /// if there was an I/O error.
-    fn bg(&mut self, color: color::Color) -> IoResult<bool>;
+    fn bg(&mut self, color: color::Color) -> io::Result<bool>;
 
-    /// Sets the given terminal attribute, if supported.  Returns `Ok(true)`
+    /// Sets the given terminal attribute, if supported. Returns `Ok(true)`
     /// if the attribute was supported, `Ok(false)` otherwise, and `Err(e)` if
     /// there was an I/O error.
-    fn attr(&mut self, attr: attr::Attr) -> IoResult<bool>;
+    fn attr(&mut self, attr: Attr) -> io::Result<bool>;
 
-    /// Returns whether the given terminal attribute is supported.
-    fn supports_attr(&self, attr: attr::Attr) -> bool;
+    /// Returns `true` if the given terminal attribute is supported.
+    fn supports_attr(&self, attr: Attr) -> bool;
 
-    /// Resets all terminal attributes and color to the default.
-    /// Returns `Ok()`.
-    fn reset(&mut self) -> IoResult<()>;
-
-    /// Returns the contained stream, destroying the `Terminal`
-    fn unwrap(self) -> T;
+    /// Resets all terminal attributes and colors to their defaults.
+    ///
+    /// Returns `Ok(true)` if the terminal was reset, `Ok(false)` otherwise, and `Err(e)` if there
+    /// was an I/O error.
+    ///
+    /// *Note: This does not flush.*
+    ///
+    /// That means the reset command may get buffered so, if you aren't planning on doing anything
+    /// else that might flush stdout's buffer (e.g., writing a line of text), you should flush after
+    /// calling reset.
+    fn reset(&mut self) -> io::Result<bool>;
 
     /// Gets an immutable reference to the stream inside
-    fn get_ref<'a>(&'a self) -> &'a T;
+    fn get_ref(&self) -> &Self::Output;
 
     /// Gets a mutable reference to the stream inside
-    fn get_mut<'a>(&'a mut self) -> &'a mut T;
+    fn get_mut(&mut self) -> &mut Self::Output;
+
+    /// Returns the contained stream, destroying the `Terminal`
+    fn into_inner(self) -> Self::Output where Self: Sized;
 }

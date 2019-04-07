@@ -1,27 +1,20 @@
-// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+#![allow(unused_must_use)]
+// ignore-emscripten no threads support
 
-use std::task::spawn;
+#![feature(box_syntax)]
+
+use std::thread;
 
 struct Pair {
-    a: int,
-    b: int
+    a: isize,
+    b: isize
 }
 
 pub fn main() {
-    let z = box Pair { a : 10, b : 12};
+    let z: Box<_> = box Pair { a : 10, b : 12};
 
-    let f: proc():Send = proc() {
+    thread::spawn(move|| {
         assert_eq!(z.a, 10);
         assert_eq!(z.b, 12);
-    };
-
-    spawn(f);
+    }).join();
 }

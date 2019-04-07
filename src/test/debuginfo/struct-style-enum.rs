@@ -1,36 +1,29 @@
-// Copyright 2013-2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 // ignore-tidy-linelength
-// ignore-android: FIXME(#10381)
+
+// Require LLVM with DW_TAG_variant_part and a gdb and lldb that can
+// read it.
+// min-system-llvm-version: 8.0
+// min-gdb-version: 8.2
+// rust-lldb
 
 // compile-flags:-g
 
 // === GDB TESTS ===================================================================================
 
 // gdb-command:set print union on
-// gdb-command:rbreak zzz
 // gdb-command:run
-// gdb-command:finish
 
 // gdb-command:print case1
-// gdb-check:$1 = {{Case1, a = 0, b = 31868, c = 31868, d = 31868, e = 31868}, {Case1, a = 0, b = 2088533116, c = 2088533116}, {Case1, a = 0, b = 8970181431921507452}}
+// gdbr-check:$1 = struct_style_enum::Regular::Case1{a: 0, b: 31868, c: 31868, d: 31868, e: 31868}
 
 // gdb-command:print case2
-// gdb-check:$2 = {{Case2, a = 0, b = 4369, c = 4369, d = 4369, e = 4369}, {Case2, a = 0, b = 286331153, c = 286331153}, {Case2, a = 0, b = 1229782938247303441}}
+// gdbr-check:$2 = struct_style_enum::Regular::Case2{a: 0, b: 286331153, c: 286331153}
 
 // gdb-command:print case3
-// gdb-check:$3 = {{Case3, a = 0, b = 22873, c = 22873, d = 22873, e = 22873}, {Case3, a = 0, b = 1499027801, c = 1499027801}, {Case3, a = 0, b = 6438275382588823897}}
+// gdbr-check:$3 = struct_style_enum::Regular::Case3{a: 0, b: 6438275382588823897}
 
 // gdb-command:print univariant
-// gdb-check:$4 = {{a = -1}}
+// gdbr-check:$4 = struct_style_enum::Univariant::TheOnlyCase{a: -1}
 
 
 // === LLDB TESTS ==================================================================================
@@ -38,19 +31,23 @@
 // lldb-command:run
 
 // lldb-command:print case1
-// lldb-check:[...]$0 = Case1 { a: 0, b: 31868, c: 31868, d: 31868, e: 31868 }
+// lldbr-check:(struct_style_enum::Regular::Case1) case1 = { a = 0 b = 31868 c = 31868 d = 31868 e = 31868 }
 
 // lldb-command:print case2
-// lldb-check:[...]$1 = Case2 { a: 0, b: 286331153, c: 286331153 }
+// lldbr-check:(struct_style_enum::Regular::Case2) case2 = Case2 { Case1: 0, Case2: 286331153, Case3: 286331153 }
 
 // lldb-command:print case3
-// lldb-check:[...]$2 = Case3 { a: 0, b: 6438275382588823897 }
+// lldbr-check:(struct_style_enum::Regular::Case3) case3 = Case3 { Case1: 0, Case2: 6438275382588823897 }
 
 // lldb-command:print univariant
-// lldb-check:[...]$3 = TheOnlyCase { a: -1 }
+// lldbr-check:(struct_style_enum::Univariant) univariant = Univariant { TheOnlyCase: TheOnlyCase { a: -1 } }
 
-#![allow(unused_variable)]
-#![feature(struct_variant)]
+#![allow(unused_variables)]
+#![feature(omit_gdb_pretty_printer_section)]
+#![omit_gdb_pretty_printer_section]
+
+use self::Regular::{Case1, Case2, Case3};
+use self::Univariant::TheOnlyCase;
 
 // The first element is to ensure proper alignment, irrespective of the machines word size. Since
 // the size of the discriminant value is machine dependent, this has be taken into account when
@@ -67,7 +64,7 @@ enum Univariant {
 
 fn main() {
 
-    // In order to avoid endianess trouble all of the following test values consist of a single
+    // In order to avoid endianness trouble all of the following test values consist of a single
     // repeated byte. This way each interpretation of the union should look the same, no matter if
     // this is a big or little endian machine.
 

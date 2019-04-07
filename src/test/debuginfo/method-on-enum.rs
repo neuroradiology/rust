@@ -1,26 +1,17 @@
-// Copyright 2013-2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-// ignore-android: FIXME(#10381)
+// ignore-tidy-linelength
+// min-lldb-version: 310
+// ignore-test // Test temporarily ignored due to debuginfo tests being disabled, see PR 47155
 
 // compile-flags:-g
 
 // === GDB TESTS ===================================================================================
 
-// gdb-command:rbreak zzz
 // gdb-command:run
 
 // STACK BY REF
-// gdb-command:finish
 // gdb-command:print *self
-// gdb-check:$1 = {{Variant2, [...]}, {Variant2, 117901063}}
+// gdbg-check:$1 = {{RUST$ENUM$DISR = Variant2, [...]}, {RUST$ENUM$DISR = Variant2, __0 = 117901063}}
+// gdbr-check:$1 = method_on_enum::Enum::Variant2(117901063)
 // gdb-command:print arg1
 // gdb-check:$2 = -1
 // gdb-command:print arg2
@@ -28,9 +19,9 @@
 // gdb-command:continue
 
 // STACK BY VAL
-// gdb-command:finish
 // gdb-command:print self
-// gdb-check:$4 = {{Variant2, [...]}, {Variant2, 117901063}}
+// gdbg-check:$4 = {{RUST$ENUM$DISR = Variant2, [...]}, {RUST$ENUM$DISR = Variant2, __0 = 117901063}}
+// gdbr-check:$4 = method_on_enum::Enum::Variant2(117901063)
 // gdb-command:print arg1
 // gdb-check:$5 = -3
 // gdb-command:print arg2
@@ -38,9 +29,9 @@
 // gdb-command:continue
 
 // OWNED BY REF
-// gdb-command:finish
 // gdb-command:print *self
-// gdb-check:$7 = {{Variant1, x = 1799, y = 1799}, {Variant1, [...]}}
+// gdbg-check:$7 = {{RUST$ENUM$DISR = Variant1, x = 1799, y = 1799}, {RUST$ENUM$DISR = Variant1, [...]}}
+// gdbr-check:$7 = method_on_enum::Enum::Variant1{x: 1799, y: 1799}
 // gdb-command:print arg1
 // gdb-check:$8 = -5
 // gdb-command:print arg2
@@ -48,9 +39,9 @@
 // gdb-command:continue
 
 // OWNED BY VAL
-// gdb-command:finish
 // gdb-command:print self
-// gdb-check:$10 = {{Variant1, x = 1799, y = 1799}, {Variant1, [...]}}
+// gdbg-check:$10 = {{RUST$ENUM$DISR = Variant1, x = 1799, y = 1799}, {RUST$ENUM$DISR = Variant1, [...]}}
+// gdbr-check:$10 = method_on_enum::Enum::Variant1{x: 1799, y: 1799}
 // gdb-command:print arg1
 // gdb-check:$11 = -7
 // gdb-command:print arg2
@@ -58,9 +49,9 @@
 // gdb-command:continue
 
 // OWNED MOVED
-// gdb-command:finish
 // gdb-command:print *self
-// gdb-check:$13 = {{Variant1, x = 1799, y = 1799}, {Variant1, [...]}}
+// gdbg-check:$13 = {{RUST$ENUM$DISR = Variant1, x = 1799, y = 1799}, {RUST$ENUM$DISR = Variant1, [...]}}
+// gdbr-check:$13 = method_on_enum::Enum::Variant1{x: 1799, y: 1799}
 // gdb-command:print arg1
 // gdb-check:$14 = -9
 // gdb-command:print arg2
@@ -117,8 +108,11 @@
 // lldb-check:[...]$14 = -10
 // lldb-command:continue
 
-#![feature(struct_variant)]
+#![feature(box_syntax)]
+#![feature(omit_gdb_pretty_printer_section)]
+#![omit_gdb_pretty_printer_section]
 
+#[derive(Copy, Clone)]
 enum Enum {
     Variant1 { x: u16, y: u16 },
     Variant2 (u32)
@@ -126,28 +120,28 @@ enum Enum {
 
 impl Enum {
 
-    fn self_by_ref(&self, arg1: int, arg2: int) -> int {
+    fn self_by_ref(&self, arg1: isize, arg2: isize) -> isize {
         zzz(); // #break
         arg1 + arg2
     }
 
-    fn self_by_val(self, arg1: int, arg2: int) -> int {
+    fn self_by_val(self, arg1: isize, arg2: isize) -> isize {
         zzz(); // #break
         arg1 + arg2
     }
 
-    fn self_owned(self: Box<Enum>, arg1: int, arg2: int) -> int {
+    fn self_owned(self: Box<Enum>, arg1: isize, arg2: isize) -> isize {
         zzz(); // #break
         arg1 + arg2
     }
 }
 
 fn main() {
-    let stack = Variant2(117901063);
+    let stack = Enum::Variant2(117901063);
     let _ = stack.self_by_ref(-1, -2);
     let _ = stack.self_by_val(-3, -4);
 
-    let owned = box Variant1{ x: 1799, y: 1799 };
+    let owned: Box<_> = box Enum::Variant1{ x: 1799, y: 1799 };
     let _ = owned.self_by_ref(-5, -6);
     let _ = owned.self_by_val(-7, -8);
     let _ = owned.self_owned(-9, -10);

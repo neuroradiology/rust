@@ -1,160 +1,167 @@
-// Copyright 2012-2013 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+//! The "main crate" of the Rust compiler. This crate contains common
+//! type definitions that are used by the other crates in the rustc
+//! "family". Some prominent examples (note that each of these modules
+//! has their own README with further details).
+//!
+//! - **HIR.** The "high-level (H) intermediate representation (IR)" is
+//!   defined in the `hir` module.
+//! - **MIR.** The "mid-level (M) intermediate representation (IR)" is
+//!   defined in the `mir` module. This module contains only the
+//!   *definition* of the MIR; the passes that transform and operate
+//!   on MIR are found in `librustc_mir` crate.
+//! - **Types.** The internal representation of types used in rustc is
+//!   defined in the `ty` module. This includes the **type context**
+//!   (or `tcx`), which is the central context during most of
+//!   compilation, containing the interners and other things.
+//! - **Traits.** Trait resolution is implemented in the `traits` module.
+//! - **Type inference.** The type inference code can be found in the `infer` module;
+//!   this code handles low-level equality and subtyping operations. The
+//!   type check pass in the compiler is found in the `librustc_typeck` crate.
+//!
+//! For more information about how rustc works, see the [rustc guide].
+//!
+//! [rustc guide]: https://rust-lang.github.io/rustc-guide/
+//!
+//! # Note
+//!
+//! This API is completely unstable and subject to change.
 
-/*!
+#![doc(html_root_url = "https://doc.rust-lang.org/nightly/")]
 
-The Rust compiler.
+#![deny(rust_2018_idioms)]
+#![cfg_attr(not(stage0), deny(internal))]
+#![allow(explicit_outlives_requirements)]
 
-# Note
-
-This API is completely unstable and subject to change.
-
-*/
-
-#![crate_name = "rustc"]
-#![experimental]
-#![comment = "The Rust compiler"]
-#![license = "MIT/ASL2"]
-#![crate_type = "dylib"]
-#![crate_type = "rlib"]
-#![doc(html_logo_url = "http://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
-      html_favicon_url = "http://www.rust-lang.org/favicon.ico",
-      html_root_url = "http://doc.rust-lang.org/master/")]
-
-#![allow(deprecated)]
-#![feature(macro_rules, globs, struct_variant, managed_boxes, quote)]
-#![feature(default_type_params, phase, unsafe_destructor)]
-#![feature(issue_5723_bootstrap)]
-
-#![allow(unknown_features)] // NOTE: Remove after next snapshot
+#![feature(arbitrary_self_types)]
+#![feature(box_patterns)]
+#![feature(box_syntax)]
+#![feature(core_intrinsics)]
+#![feature(drain_filter)]
+#![cfg_attr(windows, feature(libc))]
+#![feature(never_type)]
+#![feature(exhaustive_patterns)]
+#![feature(extern_types)]
+#![feature(nll)]
+#![feature(non_exhaustive)]
+#![feature(proc_macro_internals)]
+#![feature(optin_builtin_traits)]
+#![feature(range_is_empty)]
 #![feature(rustc_diagnostic_macros)]
-#![feature(import_shadowing)]
+#![feature(rustc_attrs)]
+#![feature(slice_patterns)]
+#![feature(specialization)]
+#![feature(unboxed_closures)]
+#![feature(thread_local)]
+#![feature(trace_macros)]
+#![feature(trusted_len)]
+#![feature(vec_remove_item)]
+#![feature(step_trait)]
+#![feature(stmt_expr_attributes)]
+#![feature(integer_atomics)]
+#![feature(test)]
+#![feature(in_band_lifetimes)]
+#![feature(crate_visibility_modifier)]
+#![feature(proc_macro_hygiene)]
+#![feature(log_syntax)]
 
-extern crate arena;
-extern crate debug;
-extern crate flate;
+#![recursion_limit="512"]
+
+#[macro_use] extern crate bitflags;
 extern crate getopts;
-extern crate graphviz;
+#[macro_use] extern crate lazy_static;
+#[macro_use] extern crate scoped_tls;
+#[cfg(windows)]
 extern crate libc;
-extern crate llvm = "rustc_llvm";
-extern crate rustc_back = "rustc_back";
-extern crate serialize;
-extern crate rbml;
-extern crate time;
-#[phase(plugin, link)] extern crate log;
-#[phase(plugin, link)] extern crate syntax;
+#[macro_use] extern crate rustc_macros;
+#[macro_use] extern crate rustc_data_structures;
 
-#[cfg(test)]
+#[macro_use] extern crate log;
+#[macro_use] extern crate syntax;
+
+// FIXME: This import is used by deriving `RustcDecodable` and `RustcEncodable`. Removing this
+// results in a bunch of "failed to resolve" errors. Hopefully, the compiler moves to serde or
+// something, and we can get rid of this.
+#[allow(rust_2018_idioms)]
+extern crate serialize as rustc_serialize;
+
+#[macro_use] extern crate smallvec;
+
+// Note that librustc doesn't actually depend on these crates, see the note in
+// `Cargo.toml` for this crate about why these are here.
+#[allow(unused_extern_crates)]
+extern crate flate2;
+#[allow(unused_extern_crates)]
 extern crate test;
 
-mod diagnostics;
+#[macro_use]
+mod macros;
 
-pub mod back {
-    pub use rustc_back::abi;
-    pub use rustc_back::archive;
-    pub use rustc_back::arm;
-    pub use rustc_back::mips;
-    pub use rustc_back::mipsel;
-    pub use rustc_back::rpath;
-    pub use rustc_back::svh;
-    pub use rustc_back::target_strs;
-    pub use rustc_back::x86;
-    pub use rustc_back::x86_64;
+// N.B., this module needs to be declared first so diagnostics are
+// registered before they are used.
+pub mod diagnostics;
 
-    pub mod link;
-    pub mod lto;
+#[macro_use]
+pub mod query;
 
-}
+pub mod cfg;
+pub mod dep_graph;
+pub mod hir;
+pub mod ich;
+pub mod infer;
+pub mod lint;
 
 pub mod middle {
-    pub mod astencode;
+    pub mod allocator;
     pub mod borrowck;
-    pub mod cfg;
-    pub mod check_const;
-    pub mod check_loop;
-    pub mod check_match;
-    pub mod check_static;
-    pub mod const_eval;
-    pub mod dataflow;
-    pub mod dead;
-    pub mod def;
-    pub mod dependency_format;
-    pub mod effect;
-    pub mod entry;
     pub mod expr_use_visitor;
-    pub mod freevars;
-    pub mod graph;
+    pub mod cstore;
+    pub mod dead;
+    pub mod dependency_format;
+    pub mod entry;
+    pub mod exported_symbols;
+    pub mod free_region;
     pub mod intrinsicck;
-    pub mod kind;
+    pub mod lib_features;
     pub mod lang_items;
     pub mod liveness;
     pub mod mem_categorization;
-    pub mod pat_util;
     pub mod privacy;
     pub mod reachable;
     pub mod region;
-    pub mod resolve;
+    pub mod recursion_limit;
     pub mod resolve_lifetime;
-    pub mod save;
     pub mod stability;
-    pub mod subst;
-    pub mod trans;
-    pub mod ty;
-    pub mod ty_fold;
-    pub mod typeck;
     pub mod weak_lang_items;
 }
 
-pub mod front {
-    pub mod config;
-    pub mod test;
-    pub mod std_inject;
-    pub mod assign_node_ids_and_map;
-    pub mod feature_gate;
-    pub mod show_span;
-}
-
-pub mod metadata;
-
-pub mod driver;
-
-pub mod plugin;
-
-pub mod lint;
+pub mod mir;
+pub mod session;
+pub mod traits;
+pub mod ty;
 
 pub mod util {
-    pub use rustc_back::fs;
-    pub use rustc_back::sha2;
-
+    pub mod captures;
     pub mod common;
-    pub mod ppaux;
     pub mod nodemap;
-    pub mod snapshot_vec;
+    pub mod profiling;
+    pub mod bug;
 }
 
-pub mod lib {
-    pub use llvm;
+// Allows macros to refer to this crate as `::rustc`
+extern crate self as rustc;
+
+// FIXME(#27438): right now the unit tests of librustc don't refer to any actual
+//                functions generated in librustc_data_structures (all
+//                references are through generic functions), but statics are
+//                referenced from time to time. Due to this bug we won't
+//                actually correctly link in the statics unless we also
+//                reference a function, so be sure to reference a dummy
+//                function.
+#[test]
+fn noop() {
+    rustc_data_structures::__noop_fix_for_27438();
 }
 
-__build_diagnostic_array!(DIAGNOSTICS)
 
-// A private module so that macro-expanded idents like
-// `::rustc::lint::Lint` will also work in `rustc` itself.
-//
-// `libstd` uses the same trick.
-#[doc(hidden)]
-mod rustc {
-    pub use lint;
-}
-
-pub fn main() {
-    let args = std::os::args();
-    std::os::set_exit_status(driver::main_args(args.as_slice()));
-}
+// Build the diagnostics array at the end so that the metadata includes error use sites.
+__build_diagnostic_array! { librustc, DIAGNOSTICS }

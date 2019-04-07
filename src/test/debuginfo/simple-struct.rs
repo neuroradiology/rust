@@ -1,116 +1,139 @@
-// Copyright 2013-2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+// ignore-tidy-linelength
 
-// ignore-windows: FIXME #13256
-// ignore-android: FIXME(#10381)
+// min-lldb-version: 310
+// ignore-gdb // Test temporarily ignored due to debuginfo tests being disabled, see PR 47155
 
 // compile-flags:-g
 
 // === GDB TESTS ===================================================================================
 
-// gdb-command:set print pretty off
-// gdb-command:rbreak zzz
+// gdbg-command:print 'simple_struct::NO_PADDING_16'
+// gdbr-command:print simple_struct::NO_PADDING_16
+// gdbg-check:$1 = {x = 1000, y = -1001}
+// gdbr-check:$1 = simple_struct::NoPadding16 {x: 1000, y: -1001}
 
-// gdb-command:print 'simple-struct::NO_PADDING_16'
-// gdb-check:$1 = {x = 1000, y = -1001}
+// gdbg-command:print 'simple_struct::NO_PADDING_32'
+// gdbr-command:print simple_struct::NO_PADDING_32
+// gdbg-check:$2 = {x = 1, y = 2, z = 3}
+// gdbr-check:$2 = simple_struct::NoPadding32 {x: 1, y: 2, z: 3}
 
-// gdb-command:print 'simple-struct::NO_PADDING_32'
-// gdb-check:$2 = {x = 1, y = 2, z = 3}
+// gdbg-command:print 'simple_struct::NO_PADDING_64'
+// gdbr-command:print simple_struct::NO_PADDING_64
+// gdbg-check:$3 = {x = 4, y = 5, z = 6}
+// gdbr-check:$3 = simple_struct::NoPadding64 {x: 4, y: 5, z: 6}
 
-// gdb-command:print 'simple-struct::NO_PADDING_64'
-// gdb-check:$3 = {x = 4, y = 5, z = 6}
+// gdbg-command:print 'simple_struct::NO_PADDING_163264'
+// gdbr-command:print simple_struct::NO_PADDING_163264
+// gdbg-check:$4 = {a = 7, b = 8, c = 9, d = 10}
+// gdbr-check:$4 = simple_struct::NoPadding163264 {a: 7, b: 8, c: 9, d: 10}
 
-// gdb-command:print 'simple-struct::NO_PADDING_163264'
-// gdb-check:$4 = {a = 7, b = 8, c = 9, d = 10}
+// gdbg-command:print 'simple_struct::INTERNAL_PADDING'
+// gdbr-command:print simple_struct::INTERNAL_PADDING
+// gdbg-check:$5 = {x = 11, y = 12}
+// gdbr-check:$5 = simple_struct::InternalPadding {x: 11, y: 12}
 
-// gdb-command:print 'simple-struct::INTERNAL_PADDING'
-// gdb-check:$5 = {x = 11, y = 12}
-
-// gdb-command:print 'simple-struct::PADDING_AT_END'
-// gdb-check:$6 = {x = 13, y = 14}
+// gdbg-command:print 'simple_struct::PADDING_AT_END'
+// gdbr-command:print simple_struct::PADDING_AT_END
+// gdbg-check:$6 = {x = 13, y = 14}
+// gdbr-check:$6 = simple_struct::PaddingAtEnd {x: 13, y: 14}
 
 // gdb-command:run
-// gdb-command:finish
 
 // gdb-command:print no_padding16
-// gdb-check:$7 = {x = 10000, y = -10001}
+// gdbg-check:$7 = {x = 10000, y = -10001}
+// gdbr-check:$7 = simple_struct::NoPadding16 {x: 10000, y: -10001}
 
 // gdb-command:print no_padding32
-// gdb-check:$8 = {x = -10002, y = -10003.5, z = 10004}
+// gdbg-check:$8 = {x = -10002, y = -10003.5, z = 10004}
+// gdbr-check:$8 = simple_struct::NoPadding32 {x: -10002, y: -10003.5, z: 10004}
 
 // gdb-command:print no_padding64
-// gdb-check:$9 = {x = -10005.5, y = 10006, z = 10007}
+// gdbg-check:$9 = {x = -10005.5, y = 10006, z = 10007}
+// gdbr-check:$9 = simple_struct::NoPadding64 {x: -10005.5, y: 10006, z: 10007}
 
 // gdb-command:print no_padding163264
-// gdb-check:$10 = {a = -10008, b = 10009, c = 10010, d = 10011}
+// gdbg-check:$10 = {a = -10008, b = 10009, c = 10010, d = 10011}
+// gdbr-check:$10 = simple_struct::NoPadding163264 {a: -10008, b: 10009, c: 10010, d: 10011}
 
 // gdb-command:print internal_padding
-// gdb-check:$11 = {x = 10012, y = -10013}
+// gdbg-check:$11 = {x = 10012, y = -10013}
+// gdbr-check:$11 = simple_struct::InternalPadding {x: 10012, y: -10013}
 
 // gdb-command:print padding_at_end
-// gdb-check:$12 = {x = -10014, y = 10015}
+// gdbg-check:$12 = {x = -10014, y = 10015}
+// gdbr-check:$12 = simple_struct::PaddingAtEnd {x: -10014, y: 10015}
 
-// gdb-command:print 'simple-struct::NO_PADDING_16'
-// gdb-check:$13 = {x = 100, y = -101}
+// gdbg-command:print 'simple_struct::NO_PADDING_16'
+// gdbr-command:print simple_struct::NO_PADDING_16
+// gdbg-check:$13 = {x = 100, y = -101}
+// gdbr-check:$13 = simple_struct::NoPadding16 {x: 100, y: -101}
 
-// gdb-command:print 'simple-struct::NO_PADDING_32'
-// gdb-check:$14 = {x = -15, y = -16, z = 17}
+// gdbg-command:print 'simple_struct::NO_PADDING_32'
+// gdbr-command:print simple_struct::NO_PADDING_32
+// gdbg-check:$14 = {x = -15, y = -16, z = 17}
+// gdbr-check:$14 = simple_struct::NoPadding32 {x: -15, y: -16, z: 17}
 
-// gdb-command:print 'simple-struct::NO_PADDING_64'
-// gdb-check:$15 = {x = -18, y = 19, z = 20}
+// gdbg-command:print 'simple_struct::NO_PADDING_64'
+// gdbr-command:print simple_struct::NO_PADDING_64
+// gdbg-check:$15 = {x = -18, y = 19, z = 20}
+// gdbr-check:$15 = simple_struct::NoPadding64 {x: -18, y: 19, z: 20}
 
-// gdb-command:print 'simple-struct::NO_PADDING_163264'
-// gdb-check:$16 = {a = -21, b = 22, c = 23, d = 24}
+// gdbg-command:print 'simple_struct::NO_PADDING_163264'
+// gdbr-command:print simple_struct::NO_PADDING_163264
+// gdbg-check:$16 = {a = -21, b = 22, c = 23, d = 24}
+// gdbr-check:$16 = simple_struct::NoPadding163264 {a: -21, b: 22, c: 23, d: 24}
 
-// gdb-command:print 'simple-struct::INTERNAL_PADDING'
-// gdb-check:$17 = {x = 25, y = -26}
+// gdbg-command:print 'simple_struct::INTERNAL_PADDING'
+// gdbr-command:print simple_struct::INTERNAL_PADDING
+// gdbg-check:$17 = {x = 25, y = -26}
+// gdbr-check:$17 = simple_struct::InternalPadding {x: 25, y: -26}
 
-// gdb-command:print 'simple-struct::PADDING_AT_END'
-// gdb-check:$18 = {x = -27, y = 28}
+// gdbg-command:print 'simple_struct::PADDING_AT_END'
+// gdbr-command:print simple_struct::PADDING_AT_END
+// gdbg-check:$18 = {x = -27, y = 28}
+// gdbr-check:$18 = simple_struct::PaddingAtEnd {x: -27, y: 28}
 
-// gdb-command:print inheriting
-// gdb-check:$19 = {a = 10019, b = -10020, x = -10016, y = -10017.5, z = 10018}
-
+// gdb-command:continue
 
 // === LLDB TESTS ==================================================================================
 
 // lldb-command:run
 
 // lldb-command:print no_padding16
-// lldb-check:[...]$0 = NoPadding16 { x: 10000, y: -10001 }
+// lldbg-check:[...]$0 = NoPadding16 { x: 10000, y: -10001 }
+// lldbr-check:(simple_struct::NoPadding16) no_padding16 = NoPadding16 { x: 10000, y: -10001 }
 
 // lldb-command:print no_padding32
-// lldb-check:[...]$1 = NoPadding32 { x: -10002, y: -10003.5, z: 10004 }
+// lldbg-check:[...]$1 = NoPadding32 { x: -10002, y: -10003.5, z: 10004 }
+// lldbr-check:(simple_struct::NoPadding32) no_padding32 = NoPadding32 { x: -10002, y: -10003.5, z: 10004 }
 
 // lldb-command:print no_padding64
-// lldb-check:[...]$2 = NoPadding64 { x: -10005.5, y: 10006, z: 10007 }
+// lldbg-check:[...]$2 = NoPadding64 { x: -10005.5, y: 10006, z: 10007 }
+// lldbr-check:(simple_struct::NoPadding64) no_padding64 = NoPadding64 { x: -10005.5, y: 10006, z: 10007 }
 
 // lldb-command:print no_padding163264
-// lldb-check:[...]$3 = NoPadding163264 { a: -10008, b: 10009, c: 10010, d: 10011 }
+// lldbg-check:[...]$3 = NoPadding163264 { a: -10008, b: 10009, c: 10010, d: 10011 }
+// lldbr-check:(simple_struct::NoPadding163264) no_padding163264 = NoPadding163264 { a: -10008, b: 10009, c: 10010, d: 10011 }
 
 // lldb-command:print internal_padding
-// lldb-check:[...]$4 = InternalPadding { x: 10012, y: -10013 }
+// lldbg-check:[...]$4 = InternalPadding { x: 10012, y: -10013 }
+// lldbr-check:(simple_struct::InternalPadding) internal_padding = InternalPadding { x: 10012, y: -10013 }
 
 // lldb-command:print padding_at_end
-// lldb-check:[...]$5 = PaddingAtEnd { x: -10014, y: 10015 }
+// lldbg-check:[...]$5 = PaddingAtEnd { x: -10014, y: 10015 }
+// lldbr-check:(simple_struct::PaddingAtEnd) padding_at_end = PaddingAtEnd { x: -10014, y: 10015 }
 
-#![feature(struct_inherit)];
-#![allow(unused_variable)];
-#![allow(dead_code)];
+#![allow(unused_variables)]
+#![allow(dead_code)]
+#![feature(omit_gdb_pretty_printer_section)]
+#![omit_gdb_pretty_printer_section]
 
 struct NoPadding16 {
     x: u16,
     y: i16
 }
 
-virtual struct NoPadding32 {
+struct NoPadding32 {
     x: i32,
     y: f32,
     z: u32
@@ -173,11 +196,6 @@ static mut PADDING_AT_END: PaddingAtEnd = PaddingAtEnd {
     y: 14
 };
 
-struct Inheriting : NoPadding32 {
-    a: u16,
-    b: i16
-}
-
 fn main() {
     let no_padding16 = NoPadding16 { x: 10000, y: -10001 };
     let no_padding32 = NoPadding32 { x: -10002, y: -10003.5, z: 10004 };
@@ -186,8 +204,6 @@ fn main() {
 
     let internal_padding = InternalPadding { x: 10012, y: -10013 };
     let padding_at_end = PaddingAtEnd { x: -10014, y: 10015 };
-
-    let inheriting = Inheriting { a: 10019, b: -10020, x: -10016, y: -10017.5, z: 10018 };
 
     unsafe {
         NO_PADDING_16.x = 100;

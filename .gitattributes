@@ -4,8 +4,12 @@
 *.cpp rust
 *.h rust
 *.rs rust
-src/etc/pkg/rust-logo.ico binary
-src/etc/pkg/rust-logo.png binary
-src/rt/msvc/* -whitespace
-src/rt/valgrind/* -whitespace
+*.fixed linguist-language=Rust
+src/etc/installer/gfx/* binary
 *.woff binary
+src/vendor/** -text
+Cargo.lock -merge linguist-generated=false
+
+# Older git versions try to fix line endings on images, this prevents it.
+*.png binary
+*.ico binary

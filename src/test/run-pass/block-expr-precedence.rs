@@ -1,17 +1,10 @@
-// Copyright 2012 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
+#![allow(unused_must_use)]
+#![allow(unused_parens)]
 // This test has some extra semis in it that the pretty-printer won't
 // reproduce so we don't want to automatically reformat it
 
 // no-reformat
+
 
 /*
  *
@@ -58,9 +51,9 @@ pub fn main() {
 
   let num = 12;
 
-  assert_eq!(if (true) { 12i } else { 12 } - num, 0);
-  assert_eq!(12i - if (true) { 12i } else { 12 }, 0);
-  if (true) { 12i; } {-num};
-  if (true) { 12i; }; {-num};
-  if (true) { 12i; };;; -num;
+  assert_eq!(if (true) { 12 } else { 12 } - num, 0);
+  assert_eq!(12 - if (true) { 12 } else { 12 }, 0);
+  if (true) { 12; } {-num};
+  if (true) { 12; }; {-num};
+  if (true) { 12; };;; -num;
 }

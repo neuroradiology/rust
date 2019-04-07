@@ -1,232 +1,301 @@
-# Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-# file at the top-level directory of this distribution and at
-# http://rust-lang.org/COPYRIGHT.
-#
-# Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-# http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-# <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-# option. This file may not be copied, modified, or distributed
-# except according to those terms.
-
 import lldb
+import re
+import debugger_pretty_printers_common as rustpp
 
-def print_val(val, internal_dict):
-  '''Prints the given value with Rust syntax'''
-  type_class = val.GetType().GetTypeClass()
+#===============================================================================
+# LLDB Pretty Printing Module for Rust
+#===============================================================================
 
-  if type_class == lldb.eTypeClassStruct:
-    return print_struct_val(val, internal_dict)
+class LldbType(rustpp.Type):
 
-  if type_class == lldb.eTypeClassUnion:
-    return print_enum_val(val, internal_dict)
+    def __init__(self, ty):
+        super(LldbType, self).__init__()
+        self.ty = ty
+        self.fields = None
 
-  if type_class == lldb.eTypeClassPointer:
-    return print_pointer_val(val, internal_dict)
+    def get_unqualified_type_name(self):
+        qualified_name = self.ty.GetName()
 
-  if type_class == lldb.eTypeClassArray:
-    return print_fixed_size_vec_val(val, internal_dict)
+        if qualified_name is None:
+            return qualified_name
 
-  return val.GetValue()
+        return rustpp.extract_type_name(qualified_name).replace("&'static ", "&")
+
+    def get_dwarf_type_kind(self):
+        type_class = self.ty.GetTypeClass()
+
+        if type_class == lldb.eTypeClassStruct:
+            return rustpp.DWARF_TYPE_CODE_STRUCT
+
+        if type_class == lldb.eTypeClassUnion:
+            return rustpp.DWARF_TYPE_CODE_UNION
+
+        if type_class == lldb.eTypeClassPointer:
+            return rustpp.DWARF_TYPE_CODE_PTR
+
+        if type_class == lldb.eTypeClassArray:
+            return rustpp.DWARF_TYPE_CODE_ARRAY
+
+        if type_class == lldb.eTypeClassEnumeration:
+            return rustpp.DWARF_TYPE_CODE_ENUM
+
+        return None
+
+    def get_fields(self):
+        assert ((self.get_dwarf_type_kind() == rustpp.DWARF_TYPE_CODE_STRUCT) or
+                (self.get_dwarf_type_kind() == rustpp.DWARF_TYPE_CODE_UNION))
+        if self.fields is None:
+            self.fields = list(self.ty.fields)
+        return self.fields
+
+    def get_wrapped_value(self):
+        return self.ty
+
+
+class LldbValue(rustpp.Value):
+    def __init__(self, lldb_val):
+        ty = lldb_val.type
+        wty = LldbType(ty)
+        super(LldbValue, self).__init__(wty)
+        self.lldb_val = lldb_val
+        self.children = {}
+
+    def get_child_at_index(self, index):
+        child = self.children.get(index)
+        if child is None:
+            lldb_field = self.lldb_val.GetChildAtIndex(index)
+            child = LldbValue(lldb_field)
+            self.children[index] = child
+        return child
+
+    def as_integer(self):
+        return self.lldb_val.GetValueAsUnsigned()
+
+    def get_wrapped_value(self):
+        return self.lldb_val
+
+
+def print_val(lldb_val, internal_dict):
+    val = LldbValue(lldb_val)
+    type_kind = val.type.get_type_kind()
+
+    if (type_kind == rustpp.TYPE_KIND_REGULAR_STRUCT or
+        type_kind == rustpp.TYPE_KIND_REGULAR_UNION or
+        type_kind == rustpp.TYPE_KIND_EMPTY):
+        return print_struct_val(val,
+                                internal_dict,
+                                omit_first_field = False,
+                                omit_type_name = False,
+                                is_tuple_like = False)
+
+    if type_kind == rustpp.TYPE_KIND_STRUCT_VARIANT:
+        return print_struct_val(val,
+                                internal_dict,
+                                omit_first_field = True,
+                                omit_type_name = False,
+                                is_tuple_like = False)
+
+    if type_kind == rustpp.TYPE_KIND_SLICE:
+        return print_vec_slice_val(val, internal_dict)
+
+    if type_kind == rustpp.TYPE_KIND_STR_SLICE:
+        return print_str_slice_val(val, internal_dict)
+
+    if type_kind == rustpp.TYPE_KIND_STD_VEC:
+        return print_std_vec_val(val, internal_dict)
+
+    if type_kind == rustpp.TYPE_KIND_STD_STRING:
+        return print_std_string_val(val, internal_dict)
+
+    if type_kind == rustpp.TYPE_KIND_TUPLE:
+        return print_struct_val(val,
+                                internal_dict,
+                                omit_first_field = False,
+                                omit_type_name = True,
+                                is_tuple_like = True)
+
+    if type_kind == rustpp.TYPE_KIND_TUPLE_STRUCT:
+        return print_struct_val(val,
+                                internal_dict,
+                                omit_first_field = False,
+                                omit_type_name = False,
+                                is_tuple_like = True)
+
+    if type_kind == rustpp.TYPE_KIND_CSTYLE_VARIANT:
+        return val.type.get_unqualified_type_name()
+
+    if type_kind == rustpp.TYPE_KIND_TUPLE_VARIANT:
+        return print_struct_val(val,
+                                internal_dict,
+                                omit_first_field = True,
+                                omit_type_name = False,
+                                is_tuple_like = True)
+
+    if type_kind == rustpp.TYPE_KIND_SINGLETON_ENUM:
+        return print_val(lldb_val.GetChildAtIndex(0), internal_dict)
+
+    if type_kind == rustpp.TYPE_KIND_PTR:
+        return print_pointer_val(val, internal_dict)
+
+    if type_kind == rustpp.TYPE_KIND_FIXED_SIZE_VEC:
+        return print_fixed_size_vec_val(val, internal_dict)
+
+    if type_kind == rustpp.TYPE_KIND_REGULAR_ENUM:
+        # This is a regular enum, extract the discriminant
+        discriminant_val = rustpp.get_discriminant_value_as_integer(val)
+        return print_val(lldb_val.GetChildAtIndex(discriminant_val), internal_dict)
+
+    if type_kind == rustpp.TYPE_KIND_COMPRESSED_ENUM:
+        encoded_enum_info = rustpp.EncodedEnumInfo(val)
+        if encoded_enum_info.is_null_variant():
+            return encoded_enum_info.get_null_variant_name()
+
+        non_null_val = encoded_enum_info.get_non_null_variant_val()
+        return print_val(non_null_val.get_wrapped_value(), internal_dict)
+
+    # No pretty printer has been found
+    return lldb_val.GetValue()
 
 
 #=--------------------------------------------------------------------------------------------------
 # Type-Specialized Printing Functions
 #=--------------------------------------------------------------------------------------------------
 
-def print_struct_val(val, internal_dict):
-  '''Prints a struct, tuple, or tuple struct value with Rust syntax'''
-  assert val.GetType().GetTypeClass() == lldb.eTypeClassStruct
+def print_struct_val(val, internal_dict, omit_first_field, omit_type_name, is_tuple_like):
+    """
+    Prints a struct, tuple, or tuple struct value with Rust syntax.
+    Ignores any fields before field_start_index.
+    """
+    assert (val.type.get_dwarf_type_kind() == rustpp.DWARF_TYPE_CODE_STRUCT or
+            val.type.get_dwarf_type_kind() == rustpp.DWARF_TYPE_CODE_UNION)
 
-  if is_vec_slice(val):
-    return print_vec_slice_val(val, internal_dict)
-  else:
-    return print_struct_val_starting_from(0, val, internal_dict)
-
-def print_vec_slice_val(val, internal_dict):
-  output = "&["
-
-  length = val.GetChildAtIndex(1).GetValueAsUnsigned()
-
-  data_ptr_val = val.GetChildAtIndex(0)
-  data_ptr_type = data_ptr_val.GetType()
-  assert data_ptr_type.IsPointerType()
-
-  element_type = data_ptr_type.GetPointeeType()
-  element_type_size = element_type.GetByteSize()
-
-  start_address = data_ptr_val.GetValueAsUnsigned()
-
-  for i in range(length):
-    address = start_address + i * element_type_size
-    element_val = val.CreateValueFromAddress( val.GetName() + ("[%s]" % i), address, element_type )
-    output += print_val(element_val, internal_dict)
-
-    if i != length - 1:
-      output += ", "
-
-  output += "]"
-  return output
-
-def print_struct_val_starting_from(field_start_index, val, internal_dict):
-  '''
-  Prints a struct, tuple, or tuple struct value with Rust syntax.
-  Ignores any fields before field_start_index.
-  '''
-  assert val.GetType().GetTypeClass() == lldb.eTypeClassStruct
-
-  t = val.GetType()
-  has_field_names = type_has_field_names(t)
-  type_name = extract_type_name(t.GetName())
-  output = ""
-
-  if not type_name.startswith("("):
-    # this is a tuple, so don't print the type name
-    output += type_name
-
-  if has_field_names:
-    output += " { \n"
-  else:
-    output += "("
-
-  num_children = val.num_children
-
-  for child_index in range(field_start_index, num_children):
-    if has_field_names:
-      field_name = t.GetFieldAtIndex(child_index).GetName()
-      output += field_name + ": "
-
-    field_val = val.GetChildAtIndex(child_index)
-    output += print_val(field_val, internal_dict)
-
-    if child_index != num_children - 1:
-      output += ", "
-
-    if has_field_names:
-      output += "\n"
-
-  if has_field_names:
-    output += "}"
-  else:
-    output += ")"
-
-  return output
-
-
-def print_enum_val(val, internal_dict):
-  '''Prints an enum value with Rust syntax'''
-
-  assert val.GetType().GetTypeClass() == lldb.eTypeClassUnion
-
-  if val.num_children == 1:
-    first_variant_name = val.GetChildAtIndex(0).GetName()
-    if first_variant_name and first_variant_name.startswith("RUST$ENCODED$ENUM$"):
-      # Try to extract the
-
-      last_separator_index = first_variant_name.rfind("$")
-      if last_separator_index == -1:
-        return "<invalid enum encoding: %s>" % first_variant_name
-
-      second_last_separator_index = first_variant_name.rfind("$", 0, last_separator_index)
-      if second_last_separator_index == -1:
-        return "<invalid enum encoding: %s>" % first_variant_name
-
-      try:
-        disr_field_index = first_variant_name[second_last_separator_index + 1 :
-                                              last_separator_index]
-        disr_field_index = int(disr_field_index)
-      except:
-        return "<invalid enum encoding: %s>" % first_variant_name
-
-      disr_val = val.GetChildAtIndex(0).GetChildAtIndex(disr_field_index).GetValueAsUnsigned()
-
-      if disr_val == 0:
-        null_variant_name = first_variant_name[last_separator_index + 1:]
-        return null_variant_name
-      else:
-        return print_struct_val_starting_from(0, val.GetChildAtIndex(0), internal_dict)
+    if omit_type_name:
+        type_name = ""
     else:
-      return print_struct_val_starting_from(0, val.GetChildAtIndex(0), internal_dict)
+        type_name = val.type.get_unqualified_type_name()
 
-  # extract the discriminator value by
-  disr_val = val.GetChildAtIndex(0).GetChildAtIndex(0)
-  disr_type = disr_val.GetType()
+    if is_tuple_like:
+        template = "%(type_name)s(%(body)s)"
+        separator = ", "
+    else:
+        template = "%(type_name)s {\n%(body)s\n}"
+        separator = ", \n"
 
-  if disr_type.GetTypeClass() != lldb.eTypeClassEnumeration:
-    return "<Invalid enum value encountered: Discriminator is not an enum>"
+    fields = val.type.get_fields()
 
-  variant_index = disr_val.GetValueAsUnsigned()
-  return print_struct_val_starting_from(1, val.GetChildAtIndex(variant_index), internal_dict)
+    def render_child(child_index):
+        this = ""
+        if not is_tuple_like:
+            field_name = fields[child_index].name
+            this += field_name + ": "
 
+        field_val = val.get_child_at_index(child_index)
+
+        if not field_val.get_wrapped_value().IsValid():
+            field = fields[child_index]
+            # LLDB is not good at handling zero-sized values, so we have to help
+            # it a little
+            if field.GetType().GetByteSize() == 0:
+                return this + rustpp.extract_type_name(field.GetType().GetName())
+            else:
+                return this + "<invalid value>"
+
+        return this + print_val(field_val.get_wrapped_value(), internal_dict)
+
+    if omit_first_field:
+        field_start_index = 1
+    else:
+        field_start_index = 0
+
+    body = separator.join([render_child(idx) for idx in range(field_start_index, len(fields))])
+
+    return template % {"type_name": type_name,
+                       "body": body}
 
 def print_pointer_val(val, internal_dict):
-  '''Prints a pointer value with Rust syntax'''
-  assert val.GetType().IsPointerType()
-  sigil = "&"
-  type_name = extract_type_name(val.GetType().GetName())
-  if type_name and type_name[0:1] in ["&", "~", "*"]:
-    sigil = type_name[0:1]
+    """Prints a pointer value with Rust syntax"""
+    assert val.type.get_dwarf_type_kind() == rustpp.DWARF_TYPE_CODE_PTR
+    sigil = "&"
+    type_name = val.type.get_unqualified_type_name()
+    if type_name and type_name[0:1] in ["&", "*"]:
+        sigil = type_name[0:1]
 
-  return sigil + hex(val.GetValueAsUnsigned()) #print_val(val.Dereference(), internal_dict)
+    return sigil + hex(val.as_integer())
 
 
 def print_fixed_size_vec_val(val, internal_dict):
-  assert val.GetType().GetTypeClass() == lldb.eTypeClassArray
+    assert val.type.get_dwarf_type_kind() == rustpp.DWARF_TYPE_CODE_ARRAY
+    lldb_val = val.get_wrapped_value()
 
-  output = "["
+    output = "["
 
-  for i in range(val.num_children):
-    output += print_val(val.GetChildAtIndex(i), internal_dict)
-    if i != val.num_children - 1:
-      output += ", "
+    for i in range(lldb_val.num_children):
+        output += print_val(lldb_val.GetChildAtIndex(i), internal_dict)
+        if i != lldb_val.num_children - 1:
+            output += ", "
 
-  output += "]"
-  return output
+    output += "]"
+    return output
 
+
+def print_vec_slice_val(val, internal_dict):
+    (length, data_ptr) = rustpp.extract_length_and_ptr_from_slice(val)
+    return "&[%s]" % print_array_of_values(val.get_wrapped_value().GetName(),
+                                           data_ptr,
+                                           length,
+                                           internal_dict)
+
+
+def print_std_vec_val(val, internal_dict):
+    (length, data_ptr, cap) = rustpp.extract_length_ptr_and_cap_from_std_vec(val)
+    return "vec![%s]" % print_array_of_values(val.get_wrapped_value().GetName(),
+                                              data_ptr,
+                                              length,
+                                              internal_dict)
+
+def print_str_slice_val(val, internal_dict):
+    (length, data_ptr) = rustpp.extract_length_and_ptr_from_slice(val)
+    return read_utf8_string(data_ptr, length)
+
+def print_std_string_val(val, internal_dict):
+    vec = val.get_child_at_index(0)
+    (length, data_ptr, cap) = rustpp.extract_length_ptr_and_cap_from_std_vec(vec)
+    return read_utf8_string(data_ptr, length)
 
 #=--------------------------------------------------------------------------------------------------
 # Helper Functions
 #=--------------------------------------------------------------------------------------------------
 
-unqualified_type_markers = frozenset(["(", "[", "&", "*"])
+def print_array_of_values(array_name, data_ptr_val, length, internal_dict):
+    """Prints a contiguous memory range, interpreting it as values of the
+       pointee-type of data_ptr_val."""
 
-def extract_type_name(qualified_type_name):
-  '''Extracts the type name from a fully qualified path'''
-  if qualified_type_name[0] in unqualified_type_markers:
-    return qualified_type_name
+    data_ptr_type = data_ptr_val.type
+    assert data_ptr_type.get_dwarf_type_kind() == rustpp.DWARF_TYPE_CODE_PTR
 
-  end_of_search = qualified_type_name.find("<")
-  if end_of_search < 0:
-    end_of_search = len(qualified_type_name)
+    element_type = data_ptr_type.get_wrapped_value().GetPointeeType()
+    element_type_size = element_type.GetByteSize()
 
-  index = qualified_type_name.rfind("::", 0, end_of_search)
-  if index < 0:
-    return qualified_type_name
-  else:
-    return qualified_type_name[index + 2:]
+    start_address = data_ptr_val.as_integer()
+    raw_value = data_ptr_val.get_wrapped_value()
 
+    def render_element(i):
+        address = start_address + i * element_type_size
+        element_val = raw_value.CreateValueFromAddress(array_name + ("[%s]" % i),
+                                                       address,
+                                                       element_type)
+        return print_val(element_val, internal_dict)
 
-def type_has_field_names(ty):
-  '''Returns true of this is a type with field names (struct, struct-like enum variant)'''
-  # This may also be an enum variant where the first field doesn't have a name but the rest has
-  if ty.GetNumberOfFields() > 1:
-    return ty.GetFieldAtIndex(1).GetName() != None
-  else:
-    return ty.GetFieldAtIndex(0).GetName() != None
+    return ', '.join([render_element(i) for i in range(length)])
 
 
-def is_vec_slice(val):
-  ty = val.GetType()
-  if ty.GetTypeClass() != lldb.eTypeClassStruct:
-    return False
-
-  if ty.GetNumberOfFields() != 2:
-    return False
-
-  if ty.GetFieldAtIndex(0).GetName() != "data_ptr":
-    return False
-
-  if ty.GetFieldAtIndex(1).GetName() != "length":
-    return False
-
-  type_name = extract_type_name(ty.GetName()).replace("&'static", "&").replace(" ", "")
-  return type_name.startswith("&[") and type_name.endswith("]")
+def read_utf8_string(ptr_val, byte_count):
+    if byte_count == 0:
+        return '""'
+    error = lldb.SBError()
+    process = ptr_val.get_wrapped_value().GetProcess()
+    data = process.ReadMemory(ptr_val.as_integer(), byte_count, error)
+    if error.Success():
+        return '"%s"' % data.decode(encoding='UTF-8')
+    else:
+        return '<error: %s>' % error.GetCString()

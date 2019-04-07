@@ -1,437 +1,272 @@
-// Copyright 2013 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+#![allow(missing_copy_implementations)]
 
-/*! Utility implementations of Reader and Writer */
+use crate::fmt;
+use crate::io::{self, Read, Initializer, Write, ErrorKind, BufRead, IoVec, IoVecMut};
+use crate::mem;
 
-use prelude::*;
-use cmp;
-use io;
-use slice::bytes::MutableByteVector;
-
-/// Wraps a `Reader`, limiting the number of bytes that can be read from it.
-pub struct LimitReader<R> {
-    limit: uint,
-    inner: R
-}
-
-impl<R: Reader> LimitReader<R> {
-    /// Creates a new `LimitReader`
-    pub fn new(r: R, limit: uint) -> LimitReader<R> {
-        LimitReader { limit: limit, inner: r }
-    }
-
-    /// Consumes the `LimitReader`, returning the underlying `Reader`.
-    pub fn unwrap(self) -> R { self.inner }
-
-    /// Returns the number of bytes that can be read before the `LimitReader`
-    /// will return EOF.
-    ///
-    /// # Note
-    ///
-    /// The reader may reach EOF after reading fewer bytes than indicated by
-    /// this method if the underlying reader reaches EOF.
-    pub fn limit(&self) -> uint { self.limit }
-}
-
-impl<R: Reader> Reader for LimitReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::IoResult<uint> {
-        if self.limit == 0 {
-            return Err(io::standard_error(io::EndOfFile));
-        }
-
-        let len = cmp::min(self.limit, buf.len());
-        let res = self.inner.read(buf.mut_slice_to(len));
-        match res {
-            Ok(len) => self.limit -= len,
-            _ => {}
-        }
-        res
-    }
-}
-
-impl<R: Buffer> Buffer for LimitReader<R> {
-    fn fill_buf<'a>(&'a mut self) -> io::IoResult<&'a [u8]> {
-        let amt = try!(self.inner.fill_buf());
-        let buf = amt.slice_to(cmp::min(amt.len(), self.limit));
-        if buf.len() == 0 {
-            Err(io::standard_error(io::EndOfFile))
-        } else {
-            Ok(buf)
-        }
-    }
-
-    fn consume(&mut self, amt: uint) {
-        // Don't let callers reset the limit by passing an overlarge value
-        let amt = cmp::min(amt, self.limit);
-        self.limit -= amt;
-        self.inner.consume(amt);
-    }
-
-}
-
-/// A `Writer` which ignores bytes written to it, like /dev/null.
-pub struct NullWriter;
-
-impl Writer for NullWriter {
-    #[inline]
-    fn write(&mut self, _buf: &[u8]) -> io::IoResult<()> { Ok(()) }
-}
-
-/// A `Reader` which returns an infinite stream of 0 bytes, like /dev/zero.
-pub struct ZeroReader;
-
-impl Reader for ZeroReader {
-    #[inline]
-    fn read(&mut self, buf: &mut [u8]) -> io::IoResult<uint> {
-        buf.set_memory(0);
-        Ok(buf.len())
-    }
-}
-
-impl Buffer for ZeroReader {
-    fn fill_buf<'a>(&'a mut self) -> io::IoResult<&'a [u8]> {
-        static DATA: [u8, ..64] = [0, ..64];
-        Ok(DATA.as_slice())
-    }
-
-    fn consume(&mut self, _amt: uint) {}
-}
-
-/// A `Reader` which is always at EOF, like /dev/null.
-pub struct NullReader;
-
-impl Reader for NullReader {
-    #[inline]
-    fn read(&mut self, _buf: &mut [u8]) -> io::IoResult<uint> {
-        Err(io::standard_error(io::EndOfFile))
-    }
-}
-
-impl Buffer for NullReader {
-    fn fill_buf<'a>(&'a mut self) -> io::IoResult<&'a [u8]> {
-        Err(io::standard_error(io::EndOfFile))
-    }
-    fn consume(&mut self, _amt: uint) {}
-}
-
-/// A `Writer` which multiplexes writes to a set of `Writer`s.
+/// Copies the entire contents of a reader into a writer.
 ///
-/// The `Writer`s are delegated to in order. If any `Writer` returns an error,
-/// that error is returned immediately and remaining `Writer`s are not called.
-pub struct MultiWriter {
-    writers: Vec<Box<Writer+'static>>
-}
+/// This function will continuously read data from `reader` and then
+/// write it into `writer` in a streaming fashion until `reader`
+/// returns EOF.
+///
+/// On success, the total number of bytes that were copied from
+/// `reader` to `writer` is returned.
+///
+/// If you’re wanting to copy the contents of one file to another and you’re
+/// working with filesystem paths, see the [`fs::copy`] function.
+///
+/// [`fs::copy`]: ../fs/fn.copy.html
+///
+/// # Errors
+///
+/// This function will return an error immediately if any call to `read` or
+/// `write` returns an error. All instances of `ErrorKind::Interrupted` are
+/// handled by this function and the underlying operation is retried.
+///
+/// # Examples
+///
+/// ```
+/// use std::io;
+///
+/// fn main() -> io::Result<()> {
+///     let mut reader: &[u8] = b"hello";
+///     let mut writer: Vec<u8> = vec![];
+///
+///     io::copy(&mut reader, &mut writer)?;
+///
+///     assert_eq!(&b"hello"[..], &writer[..]);
+///     Ok(())
+/// }
+/// ```
+#[stable(feature = "rust1", since = "1.0.0")]
+pub fn copy<R: ?Sized, W: ?Sized>(reader: &mut R, writer: &mut W) -> io::Result<u64>
+    where R: Read, W: Write
+{
+    let mut buf = unsafe {
+        let mut buf: [u8; super::DEFAULT_BUF_SIZE] = mem::uninitialized();
+        reader.initializer().initialize(&mut buf);
+        buf
+    };
 
-impl MultiWriter {
-    /// Creates a new `MultiWriter`
-    pub fn new(writers: Vec<Box<Writer+'static>>) -> MultiWriter {
-        MultiWriter { writers: writers }
-    }
-}
-
-impl Writer for MultiWriter {
-    #[inline]
-    fn write(&mut self, buf: &[u8]) -> io::IoResult<()> {
-        for writer in self.writers.mut_iter() {
-            try!(writer.write(buf));
-        }
-        Ok(())
-    }
-
-    #[inline]
-    fn flush(&mut self) -> io::IoResult<()> {
-        for writer in self.writers.mut_iter() {
-            try!(writer.flush());
-        }
-        Ok(())
-    }
-}
-
-/// A `Reader` which chains input from multiple `Reader`s, reading each to
-/// completion before moving onto the next.
-pub struct ChainedReader<I, R> {
-    readers: I,
-    cur_reader: Option<R>,
-}
-
-impl<R: Reader, I: Iterator<R>> ChainedReader<I, R> {
-    /// Creates a new `ChainedReader`
-    pub fn new(mut readers: I) -> ChainedReader<I, R> {
-        let r = readers.next();
-        ChainedReader { readers: readers, cur_reader: r }
-    }
-}
-
-impl<R: Reader, I: Iterator<R>> Reader for ChainedReader<I, R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::IoResult<uint> {
-        loop {
-            let err = match self.cur_reader {
-                Some(ref mut r) => {
-                    match r.read(buf) {
-                        Ok(len) => return Ok(len),
-                        Err(ref e) if e.kind == io::EndOfFile => None,
-                        Err(e) => Some(e),
-                    }
-                }
-                None => break
-            };
-            self.cur_reader = self.readers.next();
-            match err {
-                Some(e) => return Err(e),
-                None => {}
-            }
-        }
-        Err(io::standard_error(io::EndOfFile))
-    }
-}
-
-/// A `Reader` which forwards input from another `Reader`, passing it along to
-/// a `Writer` as well. Similar to the `tee(1)` command.
-pub struct TeeReader<R, W> {
-    reader: R,
-    writer: W,
-}
-
-impl<R: Reader, W: Writer> TeeReader<R, W> {
-    /// Creates a new `TeeReader`
-    pub fn new(r: R, w: W) -> TeeReader<R, W> {
-        TeeReader { reader: r, writer: w }
-    }
-
-    /// Consumes the `TeeReader`, returning the underlying `Reader` and
-    /// `Writer`.
-    pub fn unwrap(self) -> (R, W) {
-        let TeeReader { reader, writer } = self;
-        (reader, writer)
-    }
-}
-
-impl<R: Reader, W: Writer> Reader for TeeReader<R, W> {
-    fn read(&mut self, buf: &mut [u8]) -> io::IoResult<uint> {
-        self.reader.read(buf).and_then(|len| {
-            self.writer.write(buf.slice_to(len)).map(|()| len)
-        })
-    }
-}
-
-/// Copies all data from a `Reader` to a `Writer`.
-pub fn copy<R: Reader, W: Writer>(r: &mut R, w: &mut W) -> io::IoResult<()> {
-    let mut buf = [0, ..super::DEFAULT_BUF_SIZE];
+    let mut written = 0;
     loop {
-        let len = match r.read(buf) {
+        let len = match reader.read(&mut buf) {
+            Ok(0) => return Ok(written),
             Ok(len) => len,
-            Err(ref e) if e.kind == io::EndOfFile => return Ok(()),
+            Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
         };
-        try!(w.write(buf.slice_to(len)));
+        writer.write_all(&buf[..len])?;
+        written += len as u64;
     }
 }
 
-/// An adaptor converting an `Iterator<u8>` to a `Reader`.
-pub struct IterReader<T> {
-    iter: T,
-}
+/// A reader which is always at EOF.
+///
+/// This struct is generally created by calling [`empty`]. Please see
+/// the documentation of [`empty()`][`empty`] for more details.
+///
+/// [`empty`]: fn.empty.html
+#[stable(feature = "rust1", since = "1.0.0")]
+pub struct Empty { _priv: () }
 
-impl<T: Iterator<u8>> IterReader<T> {
-    /// Creates a new `IterReader` which will read from the specified
-    /// `Iterator`.
-    pub fn new(iter: T) -> IterReader<T> {
-        IterReader { iter: iter }
-    }
-}
+/// Constructs a new handle to an empty reader.
+///
+/// All reads from the returned reader will return [`Ok`]`(0)`.
+///
+/// [`Ok`]: ../result/enum.Result.html#variant.Ok
+///
+/// # Examples
+///
+/// A slightly sad example of not reading anything into a buffer:
+///
+/// ```
+/// use std::io::{self, Read};
+///
+/// let mut buffer = String::new();
+/// io::empty().read_to_string(&mut buffer).unwrap();
+/// assert!(buffer.is_empty());
+/// ```
+#[stable(feature = "rust1", since = "1.0.0")]
+pub fn empty() -> Empty { Empty { _priv: () } }
 
-impl<T: Iterator<u8>> Reader for IterReader<T> {
+#[stable(feature = "rust1", since = "1.0.0")]
+impl Read for Empty {
     #[inline]
-    fn read(&mut self, buf: &mut [u8]) -> io::IoResult<uint> {
-        let mut len = 0;
-        for (slot, elt) in buf.mut_iter().zip(self.iter.by_ref()) {
-            *slot = elt;
-            len += 1;
+    fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> { Ok(0) }
+
+    #[inline]
+    unsafe fn initializer(&self) -> Initializer {
+        Initializer::nop()
+    }
+}
+#[stable(feature = "rust1", since = "1.0.0")]
+impl BufRead for Empty {
+    #[inline]
+    fn fill_buf(&mut self) -> io::Result<&[u8]> { Ok(&[]) }
+    #[inline]
+    fn consume(&mut self, _n: usize) {}
+}
+
+#[stable(feature = "std_debug", since = "1.16.0")]
+impl fmt::Debug for Empty {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad("Empty { .. }")
+    }
+}
+
+/// A reader which yields one byte over and over and over and over and over and...
+///
+/// This struct is generally created by calling [`repeat`][repeat]. Please
+/// see the documentation of `repeat()` for more details.
+///
+/// [repeat]: fn.repeat.html
+#[stable(feature = "rust1", since = "1.0.0")]
+pub struct Repeat { byte: u8 }
+
+/// Creates an instance of a reader that infinitely repeats one byte.
+///
+/// All reads from this reader will succeed by filling the specified buffer with
+/// the given byte.
+///
+/// # Examples
+///
+/// ```
+/// use std::io::{self, Read};
+///
+/// let mut buffer = [0; 3];
+/// io::repeat(0b101).read_exact(&mut buffer).unwrap();
+/// assert_eq!(buffer, [0b101, 0b101, 0b101]);
+/// ```
+#[stable(feature = "rust1", since = "1.0.0")]
+pub fn repeat(byte: u8) -> Repeat { Repeat { byte } }
+
+#[stable(feature = "rust1", since = "1.0.0")]
+impl Read for Repeat {
+    #[inline]
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        for slot in &mut *buf {
+            *slot = self.byte;
         }
-        if len == 0 && buf.len() != 0 {
-            Err(io::standard_error(io::EndOfFile))
-        } else {
-            Ok(len)
+        Ok(buf.len())
+    }
+
+    #[inline]
+    fn read_vectored(&mut self, bufs: &mut [IoVecMut<'_>]) -> io::Result<usize> {
+        let mut nwritten = 0;
+        for buf in bufs {
+            nwritten += self.read(buf)?;
         }
+        Ok(nwritten)
+    }
+
+    #[inline]
+    unsafe fn initializer(&self) -> Initializer {
+        Initializer::nop()
+    }
+}
+
+#[stable(feature = "std_debug", since = "1.16.0")]
+impl fmt::Debug for Repeat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad("Repeat { .. }")
+    }
+}
+
+/// A writer which will move data into the void.
+///
+/// This struct is generally created by calling [`sink`][sink]. Please
+/// see the documentation of `sink()` for more details.
+///
+/// [sink]: fn.sink.html
+#[stable(feature = "rust1", since = "1.0.0")]
+pub struct Sink { _priv: () }
+
+/// Creates an instance of a writer which will successfully consume all data.
+///
+/// All calls to `write` on the returned instance will return `Ok(buf.len())`
+/// and the contents of the buffer will not be inspected.
+///
+/// # Examples
+///
+/// ```rust
+/// use std::io::{self, Write};
+///
+/// let buffer = vec![1, 2, 3, 5, 8];
+/// let num_bytes = io::sink().write(&buffer).unwrap();
+/// assert_eq!(num_bytes, 5);
+/// ```
+#[stable(feature = "rust1", since = "1.0.0")]
+pub fn sink() -> Sink { Sink { _priv: () } }
+
+#[stable(feature = "rust1", since = "1.0.0")]
+impl Write for Sink {
+    #[inline]
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> { Ok(buf.len()) }
+
+    #[inline]
+    fn write_vectored(&mut self, bufs: &[IoVec<'_>]) -> io::Result<usize> {
+        let total_len = bufs.iter().map(|b| b.len()).sum();
+        Ok(total_len)
+    }
+
+    #[inline]
+    fn flush(&mut self) -> io::Result<()> { Ok(()) }
+}
+
+#[stable(feature = "std_debug", since = "1.16.0")]
+impl fmt::Debug for Sink {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad("Sink { .. }")
     }
 }
 
 #[cfg(test)]
-mod test {
-    use io::{MemReader, MemWriter, BufReader};
-    use io;
-    use boxed::Box;
-    use super::*;
-    use prelude::*;
+mod tests {
+    use crate::io::prelude::*;
+    use crate::io::{copy, sink, empty, repeat};
 
     #[test]
-    fn test_limit_reader_unlimited() {
-        let mut r = MemReader::new(vec!(0, 1, 2));
-        {
-            let mut r = LimitReader::new(r.by_ref(), 4);
-            assert_eq!(vec!(0, 1, 2), r.read_to_end().unwrap());
-        }
+    fn copy_copies() {
+        let mut r = repeat(0).take(4);
+        let mut w = sink();
+        assert_eq!(copy(&mut r, &mut w).unwrap(), 4);
+
+        let mut r = repeat(0).take(1 << 17);
+        assert_eq!(copy(&mut r as &mut dyn Read, &mut w as &mut dyn Write).unwrap(), 1 << 17);
     }
 
     #[test]
-    fn test_limit_reader_limited() {
-        let mut r = MemReader::new(vec!(0, 1, 2));
-        {
-            let mut r = LimitReader::new(r.by_ref(), 2);
-            assert_eq!(vec!(0, 1), r.read_to_end().unwrap());
-        }
-        assert_eq!(vec!(2), r.read_to_end().unwrap());
+    fn sink_sinks() {
+        let mut s = sink();
+        assert_eq!(s.write(&[]).unwrap(), 0);
+        assert_eq!(s.write(&[0]).unwrap(), 1);
+        assert_eq!(s.write(&[0; 1024]).unwrap(), 1024);
+        assert_eq!(s.by_ref().write(&[0; 1024]).unwrap(), 1024);
     }
 
     #[test]
-    fn test_limit_reader_limit() {
-        let r = MemReader::new(vec!(0, 1, 2));
-        let mut r = LimitReader::new(r, 3);
-        assert_eq!(3, r.limit());
-        assert_eq!(0, r.read_byte().unwrap());
-        assert_eq!(2, r.limit());
-        assert_eq!(vec!(1, 2), r.read_to_end().unwrap());
-        assert_eq!(0, r.limit());
+    fn empty_reads() {
+        let mut e = empty();
+        assert_eq!(e.read(&mut []).unwrap(), 0);
+        assert_eq!(e.read(&mut [0]).unwrap(), 0);
+        assert_eq!(e.read(&mut [0; 1024]).unwrap(), 0);
+        assert_eq!(e.by_ref().read(&mut [0; 1024]).unwrap(), 0);
     }
 
     #[test]
-    fn test_limit_reader_overlong_consume() {
-        let mut r = MemReader::new(vec![0, 1, 2, 3, 4, 5]);
-        let mut r = LimitReader::new(r.by_ref(), 1);
-        r.consume(2);
-        assert_eq!(vec![], r.read_to_end().unwrap());
+    fn repeat_repeats() {
+        let mut r = repeat(4);
+        let mut b = [0; 1024];
+        assert_eq!(r.read(&mut b).unwrap(), 1024);
+        assert!(b.iter().all(|b| *b == 4));
     }
 
     #[test]
-    fn test_null_writer() {
-        let mut s = NullWriter;
-        let buf = vec![0, 0, 0];
-        s.write(buf.as_slice()).unwrap();
-        s.flush().unwrap();
-    }
-
-    #[test]
-    fn test_zero_reader() {
-        let mut s = ZeroReader;
-        let mut buf = vec![1, 2, 3];
-        assert_eq!(s.read(buf.as_mut_slice()), Ok(3));
-        assert_eq!(vec![0, 0, 0], buf);
-    }
-
-    #[test]
-    fn test_null_reader() {
-        let mut r = NullReader;
-        let mut buf = vec![0];
-        assert!(r.read(buf.as_mut_slice()).is_err());
-    }
-
-    #[test]
-    fn test_multi_writer() {
-        static mut writes: uint = 0;
-        static mut flushes: uint = 0;
-
-        struct TestWriter;
-        impl Writer for TestWriter {
-            fn write(&mut self, _buf: &[u8]) -> io::IoResult<()> {
-                unsafe { writes += 1 }
-                Ok(())
-            }
-
-            fn flush(&mut self) -> io::IoResult<()> {
-                unsafe { flushes += 1 }
-                Ok(())
-            }
-        }
-
-        let mut multi = MultiWriter::new(vec!(box TestWriter as Box<Writer>,
-                                              box TestWriter as Box<Writer>));
-        multi.write([1, 2, 3]).unwrap();
-        assert_eq!(2, unsafe { writes });
-        assert_eq!(0, unsafe { flushes });
-        multi.flush().unwrap();
-        assert_eq!(2, unsafe { writes });
-        assert_eq!(2, unsafe { flushes });
-    }
-
-    #[test]
-    fn test_chained_reader() {
-        let rs = vec!(MemReader::new(vec!(0, 1)), MemReader::new(vec!()),
-                      MemReader::new(vec!(2, 3)));
-        let mut r = ChainedReader::new(rs.move_iter());
-        assert_eq!(vec!(0, 1, 2, 3), r.read_to_end().unwrap());
-    }
-
-    #[test]
-    fn test_tee_reader() {
-        let mut r = TeeReader::new(MemReader::new(vec!(0, 1, 2)),
-                                   MemWriter::new());
-        assert_eq!(vec!(0, 1, 2), r.read_to_end().unwrap());
-        let (_, w) = r.unwrap();
-        assert_eq!(vec!(0, 1, 2), w.unwrap());
-    }
-
-    #[test]
-    fn test_copy() {
-        let mut r = MemReader::new(vec!(0, 1, 2, 3, 4));
-        let mut w = MemWriter::new();
-        copy(&mut r, &mut w).unwrap();
-        assert_eq!(vec!(0, 1, 2, 3, 4), w.unwrap());
-    }
-
-    #[test]
-    fn limit_reader_buffer() {
-        let data = "0123456789\n0123456789\n";
-        let mut r = BufReader::new(data.as_bytes());
-        {
-            let mut r = LimitReader::new(r.by_ref(), 3);
-            assert_eq!(r.read_line(), Ok("012".to_string()));
-            assert_eq!(r.limit(), 0);
-            assert_eq!(r.read_line().err().unwrap().kind, io::EndOfFile);
-        }
-        {
-            let mut r = LimitReader::new(r.by_ref(), 9);
-            assert_eq!(r.read_line(), Ok("3456789\n".to_string()));
-            assert_eq!(r.limit(), 1);
-            assert_eq!(r.read_line(), Ok("0".to_string()));
-        }
-        {
-            let mut r = LimitReader::new(r.by_ref(), 100);
-            assert_eq!(r.read_char(), Ok('1'));
-            assert_eq!(r.limit(), 99);
-            assert_eq!(r.read_line(), Ok("23456789\n".to_string()));
-        }
-    }
-
-    #[test]
-    fn test_iter_reader() {
-        let mut r = IterReader::new(range(0u8, 8));
-        let mut buf = [0, 0, 0];
-        let len = r.read(buf).unwrap();
-        assert_eq!(len, 3);
-        assert!(buf == [0, 1, 2]);
-
-        let len = r.read(buf).unwrap();
-        assert_eq!(len, 3);
-        assert!(buf == [3, 4, 5]);
-
-        let len = r.read(buf).unwrap();
-        assert_eq!(len, 2);
-        assert!(buf == [6, 7, 5]);
-
-        assert_eq!(r.read(buf).unwrap_err().kind, io::EndOfFile);
-    }
-
-    #[test]
-    fn iter_reader_zero_length() {
-        let mut r = IterReader::new(range(0u8, 8));
-        let mut buf = [];
-        assert_eq!(Ok(0), r.read(buf));
+    fn take_some_bytes() {
+        assert_eq!(repeat(4).take(100).bytes().count(), 100);
+        assert_eq!(repeat(4).take(100).bytes().next().unwrap().unwrap(), 4);
+        assert_eq!(repeat(1).take(10).chain(repeat(2).take(10)).bytes().count(), 20);
     }
 }

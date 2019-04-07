@@ -1,22 +1,10 @@
-// Copyright 2013-2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-// ignore-android: FIXME(#10381)
+// min-lldb-version: 310
 
 // compile-flags:-g
 
 // === GDB TESTS ===================================================================================
 
-// gdb-command:rbreak zzz
 // gdb-command:run
-// gdb-command:finish
 
 // gdb-command:print a
 // gdb-check:$1 = 1
@@ -33,12 +21,14 @@
 // gdb-command:print f
 // gdb-check:$6 = 5
 // gdb-command:print g
-// gdb-check:$7 = {6, 7}
+// gdbg-check:$7 = {__0 = 6, __1 = 7}
+// gdbr-check:$7 = (6, 7)
 
 // gdb-command:print h
 // gdb-check:$8 = 8
 // gdb-command:print i
-// gdb-check:$9 = {a = 9, b = 10}
+// gdbg-check:$9 = {a = 9, b = 10}
+// gdbr-check:$9 = destructured_local::Struct {a: 9, b: 10}
 // gdb-command:print j
 // gdb-check:$10 = 11
 
@@ -60,7 +50,8 @@
 // gdb-command:print q
 // gdb-check:$17 = 20
 // gdb-command:print r
-// gdb-check:$18 = {a = 21, b = 22}
+// gdbg-check:$18 = {a = 21, b = 22}
+// gdbr-check:$18 = destructured_local::Struct {a: 21, b: 22}
 
 // gdb-command:print s
 // gdb-check:$19 = 24
@@ -87,25 +78,30 @@
 // gdb-check:$29 = 33
 
 // gdb-command:print aa
-// gdb-check:$30 = {34, 35}
+// gdbg-check:$30 = {__0 = 34, __1 = 35}
+// gdbr-check:$30 = (34, 35)
 
 // gdb-command:print bb
-// gdb-check:$31 = {36, 37}
+// gdbg-check:$31 = {__0 = 36, __1 = 37}
+// gdbr-check:$31 = (36, 37)
 
 // gdb-command:print cc
 // gdb-check:$32 = 38
 
 // gdb-command:print dd
-// gdb-check:$33 = {40, 41, 42}
+// gdbg-check:$33 = {__0 = 40, __1 = 41, __2 = 42}
+// gdbr-check:$33 = (40, 41, 42)
 
 // gdb-command:print *ee
-// gdb-check:$34 = {43, 44, 45}
+// gdbg-check:$34 = {__0 = 43, __1 = 44, __2 = 45}
+// gdbr-check:$34 = (43, 44, 45)
 
 // gdb-command:print *ff
 // gdb-check:$35 = 46
 
 // gdb-command:print gg
-// gdb-check:$36 = {47, 48}
+// gdbg-check:$36 = {__0 = 47, __1 = 48}
+// gdbr-check:$36 = (47, 48)
 
 // gdb-command:print *hh
 // gdb-check:$37 = 50
@@ -134,117 +130,166 @@
 // lldb-command:run
 
 // lldb-command:print a
-// lldb-check:[...]$0 = 1
+// lldbg-check:[...]$0 = 1
+// lldbr-check:(isize) a = 1
 // lldb-command:print b
-// lldb-check:[...]$1 = false
+// lldbg-check:[...]$1 = false
+// lldbr-check:(bool) b = false
 
 // lldb-command:print c
-// lldb-check:[...]$2 = 2
+// lldbg-check:[...]$2 = 2
+// lldbr-check:(isize) c = 2
 // lldb-command:print d
-// lldb-check:[...]$3 = 3
+// lldbg-check:[...]$3 = 3
+// lldbr-check:(u16) d = 3
 // lldb-command:print e
-// lldb-check:[...]$4 = 4
+// lldbg-check:[...]$4 = 4
+// lldbr-check:(u16) e = 4
 
 // lldb-command:print f
-// lldb-check:[...]$5 = 5
+// lldbg-check:[...]$5 = 5
+// lldbr-check:(isize) f = 5
 // lldb-command:print g
-// lldb-check:[...]$6 = (6, 7)
+// lldbg-check:[...]$6 = (6, 7)
+// lldbr-check:((u32, u32)) g = { = 6 = 7 }
 
 // lldb-command:print h
-// lldb-check:[...]$7 = 8
+// lldbg-check:[...]$7 = 8
+// lldbr-check:(i16) h = 8
 // lldb-command:print i
-// lldb-check:[...]$8 = Struct { a: 9, b: 10 }
+// lldbg-check:[...]$8 = Struct { a: 9, b: 10 }
+// lldbr-check:(destructured_local::Struct) i = Struct { a: 9, b: 10 }
 // lldb-command:print j
-// lldb-check:[...]$9 = 11
+// lldbg-check:[...]$9 = 11
+// lldbr-check:(i16) j = 11
 
 // lldb-command:print k
-// lldb-check:[...]$10 = 12
+// lldbg-check:[...]$10 = 12
+// lldbr-check:(i64) k = 12
 // lldb-command:print l
-// lldb-check:[...]$11 = 13
+// lldbg-check:[...]$11 = 13
+// lldbr-check:(i32) l = 13
 
 // lldb-command:print m
-// lldb-check:[...]$12 = 14
+// lldbg-check:[...]$12 = 14
+// lldbr-check:(i32) m = 14
 // lldb-command:print n
-// lldb-check:[...]$13 = 16
+// lldbg-check:[...]$13 = 16
+// lldbr-check:(i32) n = 16
 
 // lldb-command:print o
-// lldb-check:[...]$14 = 18
+// lldbg-check:[...]$14 = 18
+// lldbr-check:(i32) o = 18
 
 // lldb-command:print p
-// lldb-check:[...]$15 = 19
+// lldbg-check:[...]$15 = 19
+// lldbr-check:(i64) p = 19
 // lldb-command:print q
-// lldb-check:[...]$16 = 20
+// lldbg-check:[...]$16 = 20
+// lldbr-check:(i32) q = 20
 // lldb-command:print r
-// lldb-check:[...]$17 = Struct { a: 21, b: 22 }
+// lldbg-check:[...]$17 = Struct { a: 21, b: 22 }
+// lldbr-check:(destructured_local::Struct) r = Struct { a: 21, b: 22 }
 
 // lldb-command:print s
-// lldb-check:[...]$18 = 24
+// lldbg-check:[...]$18 = 24
+// lldbr-check:(i32) s = 24
 // lldb-command:print t
-// lldb-check:[...]$19 = 23
+// lldbg-check:[...]$19 = 23
+// lldbr-check:(i64) t = 23
 
 // lldb-command:print u
-// lldb-check:[...]$20 = 25
+// lldbg-check:[...]$20 = 25
+// lldbr-check:(i32) u = 25
 // lldb-command:print v
-// lldb-check:[...]$21 = 26
+// lldbg-check:[...]$21 = 26
+// lldbr-check:(i32) v = 26
 // lldb-command:print w
-// lldb-check:[...]$22 = 27
+// lldbg-check:[...]$22 = 27
+// lldbr-check:(i32) w = 27
 // lldb-command:print x
-// lldb-check:[...]$23 = 28
+// lldbg-check:[...]$23 = 28
+// lldbr-check:(i32) x = 28
 // lldb-command:print y
-// lldb-check:[...]$24 = 29
+// lldbg-check:[...]$24 = 29
+// lldbr-check:(i64) y = 29
 // lldb-command:print z
-// lldb-check:[...]$25 = 30
+// lldbg-check:[...]$25 = 30
+// lldbr-check:(i32) z = 30
 // lldb-command:print ae
-// lldb-check:[...]$26 = 31
+// lldbg-check:[...]$26 = 31
+// lldbr-check:(i64) ae = 31
 // lldb-command:print oe
-// lldb-check:[...]$27 = 32
+// lldbg-check:[...]$27 = 32
+// lldbr-check:(i32) oe = 32
 // lldb-command:print ue
-// lldb-check:[...]$28 = 33
+// lldbg-check:[...]$28 = 33
+// lldbr-check:(i32) ue = 33
 
 // lldb-command:print aa
-// lldb-check:[...]$29 = (34, 35)
+// lldbg-check:[...]$29 = (34, 35)
+// lldbr-check:((i32, i32)) aa = { = 34 = 35 }
 
 // lldb-command:print bb
-// lldb-check:[...]$30 = (36, 37)
+// lldbg-check:[...]$30 = (36, 37)
+// lldbr-check:((i32, i32)) bb = { = 36 = 37 }
 
 // lldb-command:print cc
-// lldb-check:[...]$31 = 38
+// lldbg-check:[...]$31 = 38
+// lldbr-check:(i32) cc = 38
 
 // lldb-command:print dd
-// lldb-check:[...]$32 = (40, 41, 42)
+// lldbg-check:[...]$32 = (40, 41, 42)
+// lldbr-check:((i32, i32, i32)) dd = { = 40 = 41 = 42 }
 
 // lldb-command:print *ee
-// lldb-check:[...]$33 = (43, 44, 45)
+// lldbg-check:[...]$33 = (43, 44, 45)
+// lldbr-check:((i32, i32, i32)) *ee = { = 43 = 44 = 45 }
 
 // lldb-command:print *ff
-// lldb-check:[...]$34 = 46
+// lldbg-check:[...]$34 = 46
+// lldbr-check:(i32) *ff = 46
 
 // lldb-command:print gg
-// lldb-check:[...]$35 = (47, 48)
+// lldbg-check:[...]$35 = (47, 48)
+// lldbr-check:((i32, i32)) gg = { = 47 = 48 }
 
 // lldb-command:print *hh
-// lldb-check:[...]$36 = 50
+// lldbg-check:[...]$36 = 50
+// lldbr-check:(i32) *hh = 50
 
 // lldb-command:print ii
-// lldb-check:[...]$37 = 51
+// lldbg-check:[...]$37 = 51
+// lldbr-check:(i32) ii = 51
 
 // lldb-command:print *jj
-// lldb-check:[...]$38 = 52
+// lldbg-check:[...]$38 = 52
+// lldbr-check:(i32) *jj = 52
 
 // lldb-command:print kk
-// lldb-check:[...]$39 = 53
+// lldbg-check:[...]$39 = 53
+// lldbr-check:(f64) kk = 53
 
 // lldb-command:print ll
-// lldb-check:[...]$40 = 54
+// lldbg-check:[...]$40 = 54
+// lldbr-check:(isize) ll = 54
 
 // lldb-command:print mm
-// lldb-check:[...]$41 = 55
+// lldbg-check:[...]$41 = 55
+// lldbr-check:(f64) mm = 55
 
 // lldb-command:print *nn
-// lldb-check:[...]$42 = 56
+// lldbg-check:[...]$42 = 56
+// lldbr-check:(isize) *nn = 56
 
 
-#![allow(unused_variable)]
+#![allow(unused_variables)]
+#![feature(box_patterns)]
+#![feature(box_syntax)]
+#![feature(omit_gdb_pretty_printer_section)]
+#![omit_gdb_pretty_printer_section]
+
+use self::Univariant::Unit;
 
 struct Struct {
     a: i64,
@@ -255,18 +300,18 @@ enum Univariant {
     Unit(i32)
 }
 
-struct TupleStruct (f64, int);
+struct TupleStruct (f64, isize);
 
 
 fn main() {
     // simple tuple
-    let (a, b) : (int, bool) = (1, false);
+    let (a, b) : (isize, bool) = (1, false);
 
     // nested tuple
-    let (c, (d, e)) : (int, (u16, u16)) = (2, (3, 4));
+    let (c, (d, e)) : (isize, (u16, u16)) = (2, (3, 4));
 
     // bind tuple-typed value to one name (destructure only first level)
-    let (f, g) : (int, (u32, u32)) = (5, (6, 7));
+    let (f, g) : (isize, (u32, u32)) = (5, (6, 7));
 
     // struct as tuple element
     let (h, i, j) : (i16, Struct, i16) = (8, Struct { a: 9, b: 10 }, 11);
@@ -275,7 +320,7 @@ fn main() {
     let Struct { a: k, b: l } = Struct { a: 12, b: 13 };
 
     // ignored tuple element
-    let (m, _, n) = (14i, 15i, 16i);
+    let (m, _, n) = (14, 15, 16);
 
     // ignored struct field
     let Struct { b: o, .. } = Struct { a: 17, b: 18 };
@@ -288,25 +333,25 @@ fn main() {
 
     // complex nesting
     let ((u, v), ((w, (x, Struct { a: y, b: z})), Struct { a: ae, b: oe }), ue) =
-        ((25i, 26i), ((27i, (28i, Struct { a: 29, b: 30})), Struct { a: 31, b: 32 }), 33i);
+        ((25, 26), ((27, (28, Struct { a: 29, b: 30})), Struct { a: 31, b: 32 }), 33);
 
     // reference
-    let &aa = &(34i, 35i);
+    let &aa = &(34, 35);
 
     // reference
-    let &bb = &(36i, 37i);
+    let &bb = &(36, 37);
 
     // contained reference
-    let (&cc, _) = (&38i, 39i);
+    let (&cc, _) = (&38, 39);
 
     // unique pointer
-    let box dd = box() (40i, 41i, 42i);
+    let box dd = box (40, 41, 42);
 
     // ref binding
-    let ref ee = (43i, 44i, 45i);
+    let ref ee = (43, 44, 45);
 
     // ref binding in tuple
-    let (ref ff, gg) = (46i, (47i, 48i));
+    let (ref ff, gg) = (46, (47, 48));
 
     // ref binding in struct
     let Struct { b: ref hh, .. } = Struct { a: 49, b: 50 };

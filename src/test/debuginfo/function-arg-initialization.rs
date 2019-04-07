@@ -1,34 +1,15 @@
-// Copyright 2013-2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+// ignore-tidy-linelength
+// ignore-test // Test temporarily ignored due to debuginfo tests being disabled, see PR 47155
+// min-lldb-version: 310
 
-// ignore-android: FIXME(#10381)
-
-// This test case checks if function arguments already have the correct value when breaking at the
-// first line of the function, that is if the function prologue has already been executed at the
-// first line. Note that because of the __morestack part of the prologue GDB incorrectly breaks at
-// before the arguments have been properly loaded when setting the breakpoint via the function name.
-// Therefore the setup here sets them using line numbers (so be careful when changing this file).
+// This test case checks if function arguments already have the correct value
+// when breaking at the first line of the function, that is if the function
+// prologue has already been executed at the first line. Note that because of
+// the __morestack part of the prologue GDB incorrectly breaks at before the
+// arguments have been properly loaded when setting the breakpoint via the
+// function name.
 
 // compile-flags:-g
-// gdb-command:set print pretty off
-// gdb-command:break function-arg-initialization.rs:243
-// gdb-command:break function-arg-initialization.rs:258
-// gdb-command:break function-arg-initialization.rs:262
-// gdb-command:break function-arg-initialization.rs:266
-// gdb-command:break function-arg-initialization.rs:270
-// gdb-command:break function-arg-initialization.rs:274
-// gdb-command:break function-arg-initialization.rs:278
-// gdb-command:break function-arg-initialization.rs:282
-// gdb-command:break function-arg-initialization.rs:286
-// gdb-command:break function-arg-initialization.rs:294
-// gdb-command:break function-arg-initialization.rs:301
 
 // === GDB TESTS ===================================================================================
 
@@ -45,9 +26,11 @@
 
 // NON IMMEDIATE ARGS
 // gdb-command:print a
-// gdb-check:$4 = {a = 3, b = 4, c = 5, d = 6, e = 7, f = 8, g = 9, h = 10}
+// gdbg-check:$4 = {a = 3, b = 4, c = 5, d = 6, e = 7, f = 8, g = 9, h = 10}
+// gdbt-check:$4 = function_arg_initialization::BigStruct {a: 3, b: 4, c: 5, d: 6, e: 7, f: 8, g: 9, h: 10}
 // gdb-command:print b
-// gdb-check:$5 = {a = 11, b = 12, c = 13, d = 14, e = 15, f = 16, g = 17, h = 18}
+// gdbg-check:$5 = {a = 11, b = 12, c = 13, d = 14, e = 15, f = 16, g = 17, h = 18}
+// gdbt-check:$5 = function_arg_initialization::BigStruct {a: 11, b: 12, c: 13, d: 14, e: 15, f: 16, g: 17, h: 18}
 // gdb-command:continue
 
 // BINDING
@@ -234,13 +217,12 @@
 // lldb-command:continue
 
 
+#![allow(unused_variables)]
+#![feature(omit_gdb_pretty_printer_section)]
+#![omit_gdb_pretty_printer_section]
 
-#![allow(unused_variable)]
-
-
-
-fn immediate_args(a: int, b: bool, c: f64) {
-    () // #break
+fn immediate_args(a: isize, b: bool, c: f64) {
+    zzz(); // #break
 }
 
 struct BigStruct {
@@ -255,19 +237,21 @@ struct BigStruct {
 }
 
 fn non_immediate_args(a: BigStruct, b: BigStruct) {
-    () // #break
+    zzz(); // #break
 }
 
 fn binding(a: i64, b: u64, c: f64) {
-    let x = 0i; // #break
+    let x = 0; // #break
+    println!("")
 }
 
 fn assignment(mut a: u64, b: u64, c: f64) {
     a = b; // #break
+    println!("")
 }
 
 fn function_call(x: u64, y: u64, z: f64) {
-    std::io::stdio::print("Hi!") // #break
+    zzz(); // #break
 }
 
 fn identifier(x: u64, y: u64, z: f64) -> u64 {
@@ -298,8 +282,8 @@ fn while_expr(mut x: u64, y: u64, z: u64) -> u64 {
 }
 
 fn loop_expr(mut x: u64, y: u64, z: u64) -> u64 {
-    loop { // #break
-        x += z;
+    loop {
+        x += z; // #break
 
         if x + y > 1000 {
             return x;
@@ -344,5 +328,4 @@ fn main() {
     loop_expr(43, 44, 45);
 }
 
-
-
+fn zzz() {()}

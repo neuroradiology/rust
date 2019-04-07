@@ -1,203 +1,197 @@
-// Copyright 2012-2013 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
+use crate::ast;
+use crate::ext::base::{self, *};
+use crate::ext::build::AstBuilder;
+use crate::parse::{self, token, DirectoryOwnership};
+use crate::print::pprust;
+use crate::ptr::P;
+use crate::symbol::Symbol;
+use crate::tokenstream;
 
-use ast;
-use codemap;
-use codemap::{Pos, Span};
-use codemap::{ExpnInfo, NameAndSpan};
-use ext::base::*;
-use ext::base;
-use ext::build::AstBuilder;
-use parse;
-use parse::token;
-use print::pprust;
+use smallvec::SmallVec;
+use syntax_pos::{self, Pos, Span, FileName};
 
-use std::gc::Gc;
-use std::io::File;
-use std::rc::Rc;
+use std::fs;
+use std::io::ErrorKind;
+use std::path::PathBuf;
+use rustc_data_structures::sync::Lrc;
 
 // These macros all relate to the file system; they either return
 // the column/row/filename of the expression, or they include
 // a given file into the current one.
 
 /// line!(): expands to the current line number
-pub fn expand_line(cx: &mut ExtCtxt, sp: Span, tts: &[ast::TokenTree])
-                   -> Box<base::MacResult+'static> {
+pub fn expand_line(cx: &mut ExtCtxt<'_>, sp: Span, tts: &[tokenstream::TokenTree])
+                   -> Box<dyn base::MacResult+'static> {
     base::check_zero_tts(cx, sp, tts, "line!");
 
-    let topmost = topmost_expn_info(cx.backtrace().unwrap());
-    let loc = cx.codemap().lookup_char_pos(topmost.call_site.lo);
+    let topmost = cx.expansion_cause().unwrap_or(sp);
+    let loc = cx.source_map().lookup_char_pos(topmost.lo());
 
-    base::MacExpr::new(cx.expr_uint(topmost.call_site, loc.line))
+    base::MacEager::expr(cx.expr_u32(topmost, loc.line as u32))
 }
 
-/* col!(): expands to the current column number */
-pub fn expand_col(cx: &mut ExtCtxt, sp: Span, tts: &[ast::TokenTree])
-                  -> Box<base::MacResult+'static> {
-    base::check_zero_tts(cx, sp, tts, "col!");
+/* column!(): expands to the current column number */
+pub fn expand_column(cx: &mut ExtCtxt<'_>, sp: Span, tts: &[tokenstream::TokenTree])
+                  -> Box<dyn base::MacResult+'static> {
+    base::check_zero_tts(cx, sp, tts, "column!");
 
-    let topmost = topmost_expn_info(cx.backtrace().unwrap());
-    let loc = cx.codemap().lookup_char_pos(topmost.call_site.lo);
-    base::MacExpr::new(cx.expr_uint(topmost.call_site, loc.col.to_uint()))
+    let topmost = cx.expansion_cause().unwrap_or(sp);
+    let loc = cx.source_map().lookup_char_pos(topmost.lo());
+
+    base::MacEager::expr(cx.expr_u32(topmost, loc.col.to_usize() as u32 + 1))
+}
+
+/* __rust_unstable_column!(): expands to the current column number */
+pub fn expand_column_gated(cx: &mut ExtCtxt<'_>, sp: Span, tts: &[tokenstream::TokenTree])
+                  -> Box<dyn base::MacResult+'static> {
+    if sp.allows_unstable("__rust_unstable_column") {
+        expand_column(cx, sp, tts)
+    } else {
+        cx.span_fatal(sp, "the __rust_unstable_column macro is unstable");
+    }
 }
 
 /// file!(): expands to the current filename */
-/// The filemap (`loc.file`) contains a bunch more information we could spit
+/// The source_file (`loc.file`) contains a bunch more information we could spit
 /// out if we wanted.
-pub fn expand_file(cx: &mut ExtCtxt, sp: Span, tts: &[ast::TokenTree])
-                   -> Box<base::MacResult+'static> {
+pub fn expand_file(cx: &mut ExtCtxt<'_>, sp: Span, tts: &[tokenstream::TokenTree])
+                   -> Box<dyn base::MacResult+'static> {
     base::check_zero_tts(cx, sp, tts, "file!");
 
-    let topmost = topmost_expn_info(cx.backtrace().unwrap());
-    let loc = cx.codemap().lookup_char_pos(topmost.call_site.lo);
-    let filename = token::intern_and_get_ident(loc.file.name.as_slice());
-    base::MacExpr::new(cx.expr_str(topmost.call_site, filename))
+    let topmost = cx.expansion_cause().unwrap_or(sp);
+    let loc = cx.source_map().lookup_char_pos(topmost.lo());
+    base::MacEager::expr(cx.expr_str(topmost, Symbol::intern(&loc.file.name.to_string())))
 }
 
-pub fn expand_stringify(cx: &mut ExtCtxt, sp: Span, tts: &[ast::TokenTree])
-                        -> Box<base::MacResult+'static> {
+pub fn expand_stringify(cx: &mut ExtCtxt<'_>, sp: Span, tts: &[tokenstream::TokenTree])
+                        -> Box<dyn base::MacResult+'static> {
     let s = pprust::tts_to_string(tts);
-    base::MacExpr::new(cx.expr_str(sp,
-                                   token::intern_and_get_ident(s.as_slice())))
+    base::MacEager::expr(cx.expr_str(sp, Symbol::intern(&s)))
 }
 
-pub fn expand_mod(cx: &mut ExtCtxt, sp: Span, tts: &[ast::TokenTree])
-                  -> Box<base::MacResult+'static> {
+pub fn expand_mod(cx: &mut ExtCtxt<'_>, sp: Span, tts: &[tokenstream::TokenTree])
+                  -> Box<dyn base::MacResult+'static> {
     base::check_zero_tts(cx, sp, tts, "module_path!");
-    let string = cx.mod_path()
-                   .iter()
-                   .map(|x| token::get_ident(*x).get().to_string())
-                   .collect::<Vec<String>>()
-                   .connect("::");
-    base::MacExpr::new(cx.expr_str(
-            sp,
-            token::intern_and_get_ident(string.as_slice())))
+    let mod_path = &cx.current_expansion.module.mod_path;
+    let string = mod_path.iter().map(|x| x.to_string()).collect::<Vec<String>>().join("::");
+
+    base::MacEager::expr(cx.expr_str(sp, Symbol::intern(&string)))
 }
 
 /// include! : parse the given file as an expr
 /// This is generally a bad idea because it's going to behave
 /// unhygienically.
-pub fn expand_include(cx: &mut ExtCtxt, sp: Span, tts: &[ast::TokenTree])
-                      -> Box<base::MacResult+'static> {
+pub fn expand_include<'cx>(cx: &'cx mut ExtCtxt<'_>, sp: Span, tts: &[tokenstream::TokenTree])
+                           -> Box<dyn base::MacResult+'cx> {
     let file = match get_single_str_from_tts(cx, sp, tts, "include!") {
         Some(f) => f,
-        None => return DummyResult::expr(sp),
+        None => return DummyResult::any(sp),
     };
     // The file will be added to the code map by the parser
-    let mut p =
-        parse::new_sub_parser_from_file(cx.parse_sess(),
-                                        cx.cfg(),
-                                        &res_rel_file(cx,
-                                                      sp,
-                                                      &Path::new(file)),
-                                        true,
-                                        None,
-                                        sp);
-    base::MacExpr::new(p.parse_expr())
+    let path = res_rel_file(cx, sp, file);
+    let directory_ownership = DirectoryOwnership::Owned { relative: None };
+    let p = parse::new_sub_parser_from_file(cx.parse_sess(), &path, directory_ownership, None, sp);
+
+    struct ExpandResult<'a> {
+        p: parse::parser::Parser<'a>,
+    }
+    impl<'a> base::MacResult for ExpandResult<'a> {
+        fn make_expr(mut self: Box<ExpandResult<'a>>) -> Option<P<ast::Expr>> {
+            Some(panictry!(self.p.parse_expr()))
+        }
+
+        fn make_items(mut self: Box<ExpandResult<'a>>) -> Option<SmallVec<[P<ast::Item>; 1]>> {
+            let mut ret = SmallVec::new();
+            while self.p.token != token::Eof {
+                match panictry!(self.p.parse_item()) {
+                    Some(item) => ret.push(item),
+                    None => self.p.diagnostic().span_fatal(self.p.span,
+                                                           &format!("expected item, found `{}`",
+                                                                    self.p.this_token_to_string()))
+                                               .raise()
+                }
+            }
+            Some(ret)
+        }
+    }
+
+    Box::new(ExpandResult { p })
 }
 
 // include_str! : read the given file, insert it as a literal string expr
-pub fn expand_include_str(cx: &mut ExtCtxt, sp: Span, tts: &[ast::TokenTree])
-                          -> Box<base::MacResult+'static> {
+pub fn expand_include_str(cx: &mut ExtCtxt<'_>, sp: Span, tts: &[tokenstream::TokenTree])
+                          -> Box<dyn base::MacResult+'static> {
     let file = match get_single_str_from_tts(cx, sp, tts, "include_str!") {
         Some(f) => f,
         None => return DummyResult::expr(sp)
     };
-    let file = res_rel_file(cx, sp, &Path::new(file));
-    let bytes = match File::open(&file).read_to_end() {
-        Err(e) => {
-            cx.span_err(sp,
-                        format!("couldn't read {}: {}",
-                                file.display(),
-                                e).as_slice());
-            return DummyResult::expr(sp);
-        }
-        Ok(bytes) => bytes,
-    };
-    match String::from_utf8(bytes) {
+    let file = res_rel_file(cx, sp, file);
+    match fs::read_to_string(&file) {
         Ok(src) => {
+            let interned_src = Symbol::intern(&src);
+
             // Add this input file to the code map to make it available as
             // dependency information
-            let filename = file.display().to_string();
-            let interned = token::intern_and_get_ident(src.as_slice());
-            cx.codemap().new_filemap(filename, src);
+            cx.source_map().new_source_file(file.into(), src);
 
-            base::MacExpr::new(cx.expr_str(sp, interned))
+            base::MacEager::expr(cx.expr_str(sp, interned_src))
+        },
+        Err(ref e) if e.kind() == ErrorKind::InvalidData => {
+            cx.span_err(sp, &format!("{} wasn't a utf-8 file", file.display()));
+            DummyResult::expr(sp)
         }
-        Err(_) => {
-            cx.span_err(sp,
-                        format!("{} wasn't a utf-8 file",
-                                file.display()).as_slice());
-            return DummyResult::expr(sp);
+        Err(e) => {
+            cx.span_err(sp, &format!("couldn't read {}: {}", file.display(), e));
+            DummyResult::expr(sp)
         }
     }
 }
 
-pub fn expand_include_bin(cx: &mut ExtCtxt, sp: Span, tts: &[ast::TokenTree])
-                          -> Box<base::MacResult+'static> {
-    let file = match get_single_str_from_tts(cx, sp, tts, "include_bin!") {
+pub fn expand_include_bytes(cx: &mut ExtCtxt<'_>, sp: Span, tts: &[tokenstream::TokenTree])
+                            -> Box<dyn base::MacResult+'static> {
+    let file = match get_single_str_from_tts(cx, sp, tts, "include_bytes!") {
         Some(f) => f,
         None => return DummyResult::expr(sp)
     };
-    let file = res_rel_file(cx, sp, &Path::new(file));
-    match File::open(&file).read_to_end() {
-        Err(e) => {
-            cx.span_err(sp,
-                        format!("couldn't read {}: {}",
-                                file.display(),
-                                e).as_slice());
-            return DummyResult::expr(sp);
-        }
+    let file = res_rel_file(cx, sp, file);
+    match fs::read(&file) {
         Ok(bytes) => {
-            let bytes = bytes.iter().map(|x| *x).collect();
-            base::MacExpr::new(cx.expr_lit(sp, ast::LitBinary(Rc::new(bytes))))
-        }
-    }
-}
-
-// recur along an ExpnInfo chain to find the original expression
-fn topmost_expn_info(expn_info: Gc<codemap::ExpnInfo>) -> Gc<codemap::ExpnInfo> {
-    match *expn_info {
-        ExpnInfo { call_site: ref call_site, .. } => {
-            match call_site.expn_info {
-                Some(next_expn_info) => {
-                    match *next_expn_info {
-                        ExpnInfo {
-                            callee: NameAndSpan { name: ref name, .. },
-                            ..
-                        } => {
-                            // Don't recurse into file using "include!"
-                            if "include" == name.as_slice() {
-                                expn_info
-                            } else {
-                                topmost_expn_info(next_expn_info)
-                            }
-                        }
-                    }
+            // Add the contents to the source map if it contains UTF-8.
+            let (contents, bytes) = match String::from_utf8(bytes) {
+                Ok(s) => {
+                    let bytes = s.as_bytes().to_owned();
+                    (s, bytes)
                 },
-                None => expn_info
-            }
+                Err(e) => (String::new(), e.into_bytes()),
+            };
+            cx.source_map().new_source_file(file.into(), contents);
+
+            base::MacEager::expr(cx.expr_lit(sp, ast::LitKind::ByteStr(Lrc::new(bytes))))
+        },
+        Err(e) => {
+            cx.span_err(sp, &format!("couldn't read {}: {}", file.display(), e));
+            DummyResult::expr(sp)
         }
     }
 }
 
 // resolve a file-system path to an absolute file-system path (if it
 // isn't already)
-fn res_rel_file(cx: &mut ExtCtxt, sp: codemap::Span, arg: &Path) -> Path {
-    // NB: relative paths are resolved relative to the compilation unit
+fn res_rel_file(cx: &mut ExtCtxt<'_>, sp: syntax_pos::Span, arg: String) -> PathBuf {
+    let arg = PathBuf::from(arg);
+    // Relative paths are resolved relative to the file in which they are found
+    // after macro expansion (that is, they are unhygienic).
     if !arg.is_absolute() {
-        let mut cu = Path::new(cx.codemap().span_to_filename(sp));
-        cu.pop();
-        cu.push(arg);
-        cu
+        let callsite = sp.source_callsite();
+        let mut path = match cx.source_map().span_to_unmapped_path(callsite) {
+            FileName::Real(path) => path,
+            FileName::DocTest(path, _) => path,
+            other => panic!("cannot resolve relative path in non-file source `{}`", other),
+        };
+        path.pop();
+        path.push(arg);
+        path
     } else {
-        arg.clone()
+        arg
     }
 }

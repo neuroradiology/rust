@@ -1,40 +1,27 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-//! # The Rust core allocation library
+//! # The Rust core allocation and collections library
 //!
-//! This is the lowest level library through which allocation in Rust can be
-//! performed where the allocation is assumed to succeed. This library will
-//! trigger a task failure when allocation fails.
+//! This library provides smart pointers and collections for managing
+//! heap-allocated values.
 //!
-//! This library, like libcore, is not intended for general usage, but rather as
-//! a building block of other libraries. The types and interfaces in this
-//! library are reexported through the [standard library](../std/index.html),
-//! and should not be used through this library.
-//!
-//! Currently, there are four major definitions in this library.
+//! This library, like libcore, normally doesn’t need to be used directly
+//! since its contents are re-exported in the [`std` crate](../std/index.html).
+//! Crates that use the `#![no_std]` attribute however will typically
+//! not depend on `std`, so they’d use this crate instead.
 //!
 //! ## Boxed values
 //!
-//! The [`Box`](boxed/index.html) type is the core owned pointer type in Rust.
-//! There can only be one owner of a `Box`, and the owner can decide to mutate
-//! the contents, which live on the heap.
+//! The [`Box`](boxed/index.html) type is a smart pointer type. There can
+//! only be one owner of a `Box`, and the owner can decide to mutate the
+//! contents, which live on the heap.
 //!
-//! This type can be sent among tasks efficiently as the size of a `Box` value
+//! This type can be sent among threads efficiently as the size of a `Box` value
 //! is the same as that of a pointer. Tree-like data structures are often built
 //! with boxes because each node often has only one owner, the parent.
 //!
 //! ## Reference counted pointers
 //!
 //! The [`Rc`](rc/index.html) type is a non-threadsafe reference-counted pointer
-//! type intended for sharing memory within a task. An `Rc` pointer wraps a
+//! type intended for sharing memory within a thread. An `Rc` pointer wraps a
 //! type, `T`, and only allows access to `&T`, a shared reference.
 //!
 //! This type is useful when inherited mutability (such as using `Box`) is too
@@ -43,90 +30,137 @@
 //!
 //! ## Atomically reference counted pointers
 //!
-//! The [`Arc`](arc/index.html) type is the threadsafe equivalent of the `Rc`
+//! The [`Arc`](sync/index.html) type is the threadsafe equivalent of the `Rc`
 //! type. It provides all the same functionality of `Rc`, except it requires
 //! that the contained type `T` is shareable. Additionally, `Arc<T>` is itself
 //! sendable while `Rc<T>` is not.
 //!
-//! This types allows for shared access to the contained data, and is often
+//! This type allows for shared access to the contained data, and is often
 //! paired with synchronization primitives such as mutexes to allow mutation of
 //! shared resources.
 //!
+//! ## Collections
+//!
+//! Implementations of the most common general purpose data structures are
+//! defined in this library. They are re-exported through the
+//! [standard collections library](../std/collections/index.html).
+//!
 //! ## Heap interfaces
 //!
-//! The [`heap`](heap/index.html) and [`libc_heap`](libc_heap/index.html)
-//! modules are the unsafe interfaces to the underlying allocation systems. The
-//! `heap` module is considered the default heap, and is not necessarily backed
-//! by libc malloc/free.  The `libc_heap` module is defined to be wired up to
-//! the system malloc/free.
+//! The [`alloc`](alloc/index.html) module defines the low-level interface to the
+//! default global allocator. It is not compatible with the libc allocator API.
 
-#![crate_name = "alloc"]
-#![experimental]
-#![license = "MIT/ASL2"]
-#![crate_type = "rlib"]
-#![doc(html_logo_url = "http://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
-       html_favicon_url = "http://www.rust-lang.org/favicon.ico",
-       html_root_url = "http://doc.rust-lang.org/")]
-
+#![allow(unused_attributes)]
+#![unstable(feature = "alloc",
+            reason = "this library is unlikely to be stabilized in its current \
+                      form or name",
+            issue = "27783")]
+#![doc(html_root_url = "https://doc.rust-lang.org/nightly/",
+       issue_tracker_base_url = "https://github.com/rust-lang/rust/issues/",
+       test(no_crate_inject, attr(allow(unused_variables), deny(warnings))))]
 #![no_std]
-#![feature(lang_items, phase, unsafe_destructor)]
+#![needs_allocator]
 
-#[phase(plugin, link)]
-extern crate core;
-extern crate libc;
+#![deny(rust_2018_idioms)]
+#![allow(explicit_outlives_requirements)]
+
+#![warn(deprecated_in_future)]
+#![warn(intra_doc_link_resolution_failure)]
+#![warn(missing_debug_implementations)]
+
+#![cfg_attr(not(test), feature(generator_trait))]
+#![cfg_attr(test, feature(test))]
+
+#![feature(allocator_api)]
+#![feature(allow_internal_unstable)]
+#![feature(arbitrary_self_types)]
+#![feature(box_into_raw_non_null)]
+#![feature(box_patterns)]
+#![feature(box_syntax)]
+#![feature(cfg_target_has_atomic)]
+#![feature(coerce_unsized)]
+#![feature(dispatch_from_dyn)]
+#![feature(core_intrinsics)]
+#![feature(custom_attribute)]
+#![feature(dropck_eyepatch)]
+#![feature(exact_size_is_empty)]
+#![feature(fmt_internals)]
+#![feature(fn_traits)]
+#![feature(fundamental)]
+#![feature(futures_api)]
+#![feature(lang_items)]
+#![feature(libc)]
+#![feature(needs_allocator)]
+#![feature(nll)]
+#![feature(optin_builtin_traits)]
+#![feature(pattern)]
+#![feature(ptr_internals)]
+#![feature(ptr_offset_from)]
+#![feature(rustc_attrs)]
+#![feature(receiver_trait)]
+#![feature(specialization)]
+#![feature(staged_api)]
+#![feature(std_internals)]
+#![feature(str_internals)]
+#![feature(trusted_len)]
+#![feature(try_reserve)]
+#![feature(unboxed_closures)]
+#![feature(unicode_internals)]
+#![feature(unsize)]
+#![feature(unsized_locals)]
+#![feature(allocator_internals)]
+#![feature(on_unimplemented)]
+#![feature(rustc_const_unstable)]
+#![feature(const_vec_new)]
+#![feature(slice_partition_dedup)]
+#![feature(maybe_uninit, maybe_uninit_slice, maybe_uninit_array)]
+#![feature(alloc_layout_extra)]
+#![feature(try_trait)]
+#![feature(iter_nth_back)]
 
 // Allow testing this library
 
-#[cfg(test)] extern crate debug;
-#[cfg(test)] extern crate native;
-#[cfg(test)] #[phase(plugin, link)] extern crate std;
-#[cfg(test)] #[phase(plugin, link)] extern crate log;
+#[cfg(test)]
+#[macro_use]
+extern crate std;
+#[cfg(test)]
+extern crate test;
 
-// The deprecated name of the boxed module
-
-#[deprecated = "use boxed instead"]
-#[cfg(not(test))]
-pub use boxed as owned;
+// Module with internal macros used by other modules (needs to be included before other modules).
+#[macro_use]
+mod macros;
 
 // Heaps provided for low-level allocation strategies
 
-pub mod heap;
-pub mod libc_heap;
-pub mod util;
+pub mod alloc;
 
 // Primitive types using the heaps above
 
+// Need to conditionally define the mod from `boxed.rs` to avoid
+// duplicating the lang-items when building in test cfg; but also need
+// to allow code to have `use boxed::Box;` declarations.
 #[cfg(not(test))]
 pub mod boxed;
-pub mod arc;
-pub mod rc;
-
-/// Common OOM routine used by liballoc
-fn oom() -> ! {
-    // FIXME(#14674): This really needs to do something other than just abort
-    //                here, but any printing done must be *guaranteed* to not
-    //                allocate.
-    unsafe { core::intrinsics::abort() }
+#[cfg(test)]
+mod boxed {
+    pub use std::boxed::Box;
 }
-
-// FIXME(#14344): When linking liballoc with libstd, this library will be linked
-//                as an rlib (it only exists as an rlib). It turns out that an
-//                optimized standard library doesn't actually use *any* symbols
-//                from this library. Everything is inlined and optimized away.
-//                This means that linkers will actually omit the object for this
-//                file, even though it may be needed in the future.
-//
-//                To get around this for now, we define a dummy symbol which
-//                will never get inlined so the stdlib can call it. The stdlib's
-//                reference to this symbol will cause this library's object file
-//                to get linked in to libstd successfully (the linker won't
-//                optimize it out).
-#[doc(hidden)]
-pub fn fixme_14344_be_sure_to_link_to_collections() {}
+#[cfg(test)]
+mod boxed_test;
+pub mod collections;
+#[cfg(all(target_has_atomic = "ptr", target_has_atomic = "cas"))]
+pub mod sync;
+pub mod rc;
+pub mod raw_vec;
+pub mod prelude;
+pub mod borrow;
+pub mod fmt;
+pub mod slice;
+pub mod str;
+pub mod string;
+pub mod vec;
 
 #[cfg(not(test))]
-#[doc(hidden)]
 mod std {
-    pub use core::fmt;
-    pub use core::option;
+    pub use core::ops; // RangeFull
 }

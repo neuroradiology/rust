@@ -1,18 +1,11 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
+#![allow(non_snake_case)]
+#![allow(unused_variables)]
 // Test that destructors for rvalue temporaries run either at end of
 // statement or end of block, as appropriate given the temporary
 // lifetime rules.
 
-#![feature(macro_rules)]
+#![feature(box_patterns)]
+#![feature(box_syntax)]
 
 use std::ops::Drop;
 
@@ -61,7 +54,7 @@ impl Drop for AddFlags {
     }
 }
 
-macro_rules! end_of_block(
+macro_rules! end_of_block {
     ($pat:pat, $expr:expr) => (
         {
             println!("end_of_block({})", stringify!({let $pat = $expr;}));
@@ -74,9 +67,9 @@ macro_rules! end_of_block(
             check_flags(1);
         }
     )
-)
+}
 
-macro_rules! end_of_stmt(
+macro_rules! end_of_stmt {
     ($pat:pat, $expr:expr) => (
         {
             println!("end_of_stmt({})", stringify!($expr));
@@ -91,7 +84,7 @@ macro_rules! end_of_stmt(
             check_flags(0);
         }
     )
-)
+}
 
 pub fn main() {
 
@@ -110,7 +103,7 @@ pub fn main() {
     end_of_block!(ref _x, AddFlags(1));
     end_of_block!(AddFlags { bits: ref _x }, AddFlags(1));
     end_of_block!(&AddFlags { bits }, &AddFlags(1));
-    end_of_block!((_, ref _y), (AddFlags(1), 22i));
+    end_of_block!((_, ref _y), (AddFlags(1), 22));
     end_of_block!(box ref _x, box AddFlags(1));
     end_of_block!(box _x, box AddFlags(1));
     end_of_block!(_, { { check_flags(0); &AddFlags(1) } });
@@ -120,7 +113,7 @@ pub fn main() {
     // LHS does not create a ref binding, so temporary lives as long
     // as statement, and we do not move the AddFlags out:
     end_of_stmt!(_, AddFlags(1));
-    end_of_stmt!((_, _), (AddFlags(1), 22i));
+    end_of_stmt!((_, _), (AddFlags(1), 22));
 
     // `&` operator appears inside an arg to a function,
     // so it is not prolonged:

@@ -1,17 +1,8 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! Item types.
 
 use std::fmt;
-use clean;
+use syntax::ext::base::MacroKind;
+use crate::clean;
 
 /// Item type. Corresponds to `clean::ItemEnum` variants.
 ///
@@ -19,82 +10,208 @@ use clean;
 /// discriminants. JavaScript then is used to decode them into the original value.
 /// Consequently, every change to this type should be synchronized to
 /// the `itemTypes` mapping table in `static/main.js`.
-#[deriving(PartialEq, Clone)]
+///
+/// In addition, code in `html::render` uses this enum to generate CSS classes, page prefixes, and
+/// module headings. If you are adding to this enum and want to ensure that the sidebar also prints
+/// a heading, edit the listing in `html/render.rs`, function `sidebar_module`. This uses an
+/// ordering based on a helper function inside `item_module`, in the same file.
+#[derive(Copy, PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
 pub enum ItemType {
     Module          = 0,
-    Struct          = 1,
-    Enum            = 2,
-    Function        = 3,
-    Typedef         = 4,
-    Static          = 5,
-    Trait           = 6,
-    Impl            = 7,
-    ViewItem        = 8,
-    TyMethod        = 9,
-    Method          = 10,
-    StructField     = 11,
-    Variant         = 12,
-    ForeignFunction = 13,
-    ForeignStatic   = 14,
-    Macro           = 15,
-    Primitive       = 16,
+    ExternCrate     = 1,
+    Import          = 2,
+    Struct          = 3,
+    Enum            = 4,
+    Function        = 5,
+    Typedef         = 6,
+    Static          = 7,
+    Trait           = 8,
+    Impl            = 9,
+    TyMethod        = 10,
+    Method          = 11,
+    StructField     = 12,
+    Variant         = 13,
+    Macro           = 14,
+    Primitive       = 15,
+    AssociatedType  = 16,
+    Constant        = 17,
+    AssociatedConst = 18,
+    Union           = 19,
+    ForeignType     = 20,
+    Keyword         = 21,
+    Existential     = 22,
+    ProcAttribute   = 23,
+    ProcDerive      = 24,
+    TraitAlias      = 25,
 }
 
-impl ItemType {
-    pub fn to_static_str(&self) -> &'static str {
-        match *self {
-            Module          => "mod",
-            Struct          => "struct",
-            Enum            => "type",
-            Function        => "fn",
-            Typedef         => "type",
-            Static          => "static",
-            Trait           => "trait",
-            Impl            => "impl",
-            ViewItem        => "viewitem",
-            TyMethod        => "tymethod",
-            Method          => "method",
-            StructField     => "structfield",
-            Variant         => "variant",
-            ForeignFunction => "ffi",
-            ForeignStatic   => "ffs",
-            Macro           => "macro",
-            Primitive       => "primitive",
+
+#[derive(Copy, Eq, PartialEq, Clone)]
+pub enum NameSpace {
+    Type,
+    Value,
+    Macro,
+    Keyword,
+}
+
+impl<'a> From<&'a clean::Item> for ItemType {
+    fn from(item: &'a clean::Item) -> ItemType {
+        let inner = match item.inner {
+            clean::StrippedItem(box ref item) => item,
+            ref inner@_ => inner,
+        };
+
+        match *inner {
+            clean::ModuleItem(..)          => ItemType::Module,
+            clean::ExternCrateItem(..)     => ItemType::ExternCrate,
+            clean::ImportItem(..)          => ItemType::Import,
+            clean::StructItem(..)          => ItemType::Struct,
+            clean::UnionItem(..)           => ItemType::Union,
+            clean::EnumItem(..)            => ItemType::Enum,
+            clean::FunctionItem(..)        => ItemType::Function,
+            clean::TypedefItem(..)         => ItemType::Typedef,
+            clean::ExistentialItem(..)     => ItemType::Existential,
+            clean::StaticItem(..)          => ItemType::Static,
+            clean::ConstantItem(..)        => ItemType::Constant,
+            clean::TraitItem(..)           => ItemType::Trait,
+            clean::ImplItem(..)            => ItemType::Impl,
+            clean::TyMethodItem(..)        => ItemType::TyMethod,
+            clean::MethodItem(..)          => ItemType::Method,
+            clean::StructFieldItem(..)     => ItemType::StructField,
+            clean::VariantItem(..)         => ItemType::Variant,
+            clean::ForeignFunctionItem(..) => ItemType::Function, // no ForeignFunction
+            clean::ForeignStaticItem(..)   => ItemType::Static, // no ForeignStatic
+            clean::MacroItem(..)           => ItemType::Macro,
+            clean::PrimitiveItem(..)       => ItemType::Primitive,
+            clean::AssociatedConstItem(..) => ItemType::AssociatedConst,
+            clean::AssociatedTypeItem(..)  => ItemType::AssociatedType,
+            clean::ForeignTypeItem         => ItemType::ForeignType,
+            clean::KeywordItem(..)         => ItemType::Keyword,
+            clean::TraitAliasItem(..)      => ItemType::TraitAlias,
+            clean::ProcMacroItem(ref mac)  => match mac.kind {
+                MacroKind::Bang            => ItemType::Macro,
+                MacroKind::Attr            => ItemType::ProcAttribute,
+                MacroKind::Derive          => ItemType::ProcDerive,
+                MacroKind::ProcMacroStub   => unreachable!(),
+            }
+            clean::StrippedItem(..)        => unreachable!(),
         }
     }
 }
 
-impl fmt::Show for ItemType {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl From<clean::TypeKind> for ItemType {
+    fn from(kind: clean::TypeKind) -> ItemType {
+        match kind {
+            clean::TypeKind::Struct     => ItemType::Struct,
+            clean::TypeKind::Union      => ItemType::Union,
+            clean::TypeKind::Enum       => ItemType::Enum,
+            clean::TypeKind::Function   => ItemType::Function,
+            clean::TypeKind::Trait      => ItemType::Trait,
+            clean::TypeKind::Module     => ItemType::Module,
+            clean::TypeKind::Static     => ItemType::Static,
+            clean::TypeKind::Const      => ItemType::Constant,
+            clean::TypeKind::Variant    => ItemType::Variant,
+            clean::TypeKind::Typedef    => ItemType::Typedef,
+            clean::TypeKind::Foreign    => ItemType::ForeignType,
+            clean::TypeKind::Macro      => ItemType::Macro,
+            clean::TypeKind::Attr       => ItemType::ProcAttribute,
+            clean::TypeKind::Derive     => ItemType::ProcDerive,
+            clean::TypeKind::TraitAlias => ItemType::TraitAlias,
+        }
+    }
+}
+
+impl ItemType {
+    pub fn css_class(&self) -> &'static str {
+        match *self {
+            ItemType::Module          => "mod",
+            ItemType::ExternCrate     => "externcrate",
+            ItemType::Import          => "import",
+            ItemType::Struct          => "struct",
+            ItemType::Union           => "union",
+            ItemType::Enum            => "enum",
+            ItemType::Function        => "fn",
+            ItemType::Typedef         => "type",
+            ItemType::Static          => "static",
+            ItemType::Trait           => "trait",
+            ItemType::Impl            => "impl",
+            ItemType::TyMethod        => "tymethod",
+            ItemType::Method          => "method",
+            ItemType::StructField     => "structfield",
+            ItemType::Variant         => "variant",
+            ItemType::Macro           => "macro",
+            ItemType::Primitive       => "primitive",
+            ItemType::AssociatedType  => "associatedtype",
+            ItemType::Constant        => "constant",
+            ItemType::AssociatedConst => "associatedconstant",
+            ItemType::ForeignType     => "foreigntype",
+            ItemType::Keyword         => "keyword",
+            ItemType::Existential     => "existential",
+            ItemType::ProcAttribute   => "attr",
+            ItemType::ProcDerive      => "derive",
+            ItemType::TraitAlias      => "traitalias",
+        }
+    }
+
+    pub fn name_space(&self) -> NameSpace {
+        match *self {
+            ItemType::Struct |
+            ItemType::Union |
+            ItemType::Enum |
+            ItemType::Module |
+            ItemType::Typedef |
+            ItemType::Trait |
+            ItemType::Primitive |
+            ItemType::AssociatedType |
+            ItemType::Existential |
+            ItemType::TraitAlias |
+            ItemType::ForeignType => NameSpace::Type,
+
+            ItemType::ExternCrate |
+            ItemType::Import |
+            ItemType::Function |
+            ItemType::Static |
+            ItemType::Impl |
+            ItemType::TyMethod |
+            ItemType::Method |
+            ItemType::StructField |
+            ItemType::Variant |
+            ItemType::Constant |
+            ItemType::AssociatedConst => NameSpace::Value,
+
+            ItemType::Macro |
+            ItemType::ProcAttribute |
+            ItemType::ProcDerive => NameSpace::Macro,
+
+            ItemType::Keyword => NameSpace::Keyword,
+        }
+    }
+}
+
+impl fmt::Display for ItemType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.css_class().fmt(f)
+    }
+}
+
+pub const NAMESPACE_TYPE: &'static str = "t";
+pub const NAMESPACE_VALUE: &'static str = "v";
+pub const NAMESPACE_MACRO: &'static str = "m";
+pub const NAMESPACE_KEYWORD: &'static str = "k";
+
+impl NameSpace {
+    pub fn to_static_str(&self) -> &'static str {
+        match *self {
+            NameSpace::Type => NAMESPACE_TYPE,
+            NameSpace::Value => NAMESPACE_VALUE,
+            NameSpace::Macro => NAMESPACE_MACRO,
+            NameSpace::Keyword => NAMESPACE_KEYWORD,
+        }
+    }
+}
+
+impl fmt::Display for NameSpace {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.to_static_str().fmt(f)
     }
 }
-
-impl fmt::Unsigned for ItemType {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        (*self as uint).fmt(f)
-    }
-}
-
-pub fn shortty(item: &clean::Item) -> ItemType {
-    match item.inner {
-        clean::ModuleItem(..)          => Module,
-        clean::StructItem(..)          => Struct,
-        clean::EnumItem(..)            => Enum,
-        clean::FunctionItem(..)        => Function,
-        clean::TypedefItem(..)         => Typedef,
-        clean::StaticItem(..)          => Static,
-        clean::TraitItem(..)           => Trait,
-        clean::ImplItem(..)            => Impl,
-        clean::ViewItemItem(..)        => ViewItem,
-        clean::TyMethodItem(..)        => TyMethod,
-        clean::MethodItem(..)          => Method,
-        clean::StructFieldItem(..)     => StructField,
-        clean::VariantItem(..)         => Variant,
-        clean::ForeignFunctionItem(..) => ForeignFunction,
-        clean::ForeignStaticItem(..)   => ForeignStatic,
-        clean::MacroItem(..)           => Macro,
-        clean::PrimitiveItem(..)       => Primitive,
-    }
-}
-
