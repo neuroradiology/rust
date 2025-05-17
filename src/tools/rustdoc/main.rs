@@ -1,3 +1,6 @@
-#![deny(rust_2018_idioms)]
+// We need this feature as it changes `dylib` linking behavior and allows us to link to `rustc_driver`.
+#![feature(rustc_private)]
 
-fn main() { rustdoc::main() }
+fn main() {
+    rustdoc::main()
+}

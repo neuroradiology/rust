@@ -1,369 +1,254 @@
-use rustc_data_structures::fx::FxHashSet;
 use std::fs;
-use std::hash::{Hash, Hasher};
+use std::iter::Peekable;
 use std::path::Path;
+use std::str::Chars;
 
-use errors::Handler;
-
-macro_rules! try_something {
-    ($e:expr, $diag:expr, $out:expr) => ({
-        match $e {
-            Ok(c) => c,
-            Err(e) => {
-                $diag.struct_err(&e.to_string()).emit();
-                return $out;
-            }
-        }
-    })
-}
-
-#[derive(Debug, Clone, Eq)]
-pub struct CssPath {
-    pub name: String,
-    pub children: FxHashSet<CssPath>,
-}
-
-// This PartialEq implementation IS NOT COMMUTATIVE!!!
-//
-// The order is very important: the second object must have all first's rules.
-// However, the first doesn't require to have all second's rules.
-impl PartialEq for CssPath {
-    fn eq(&self, other: &CssPath) -> bool {
-        if self.name != other.name {
-            false
-        } else {
-            for child in &self.children {
-                if !other.children.iter().any(|c| child == c) {
-                    return false;
-                }
-            }
-            true
-        }
-    }
-}
-
-impl Hash for CssPath {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.name.hash(state);
-        for x in &self.children {
-            x.hash(state);
-        }
-    }
-}
-
-impl CssPath {
-    fn new(name: String) -> CssPath {
-        CssPath {
-            name,
-            children: FxHashSet::default(),
-        }
-    }
-}
-
-/// All variants contain the position they occur.
-#[derive(Debug, Clone, Copy)]
-enum Events {
-    StartLineComment(usize),
-    StartComment(usize),
-    EndComment(usize),
-    InBlock(usize),
-    OutBlock(usize),
-}
-
-impl Events {
-    fn get_pos(&self) -> usize {
-        match *self {
-            Events::StartLineComment(p) |
-            Events::StartComment(p) |
-            Events::EndComment(p) |
-            Events::InBlock(p) |
-            Events::OutBlock(p) => p,
-        }
-    }
-
-    fn is_comment(&self) -> bool {
-        match *self {
-            Events::StartLineComment(_) |
-            Events::StartComment(_) |
-            Events::EndComment(_) => true,
-            _ => false,
-        }
-    }
-}
-
-fn previous_is_line_comment(events: &[Events]) -> bool {
-    if let Some(&Events::StartLineComment(_)) = events.last() {
-        true
-    } else {
-        false
-    }
-}
-
-fn is_line_comment(pos: usize, v: &[u8], events: &[Events]) -> bool {
-    if let Some(&Events::StartComment(_)) = events.last() {
-        return false;
-    }
-    pos + 1 < v.len() && v[pos + 1] == b'/'
-}
-
-fn load_css_events(v: &[u8]) -> Vec<Events> {
-    let mut pos = 0;
-    let mut events = Vec::with_capacity(100);
-
-    while pos < v.len() - 1 {
-        match v[pos] {
-            b'/' if pos + 1 < v.len() && v[pos + 1] == b'*' => {
-                events.push(Events::StartComment(pos));
-                pos += 1;
-            }
-            b'/' if is_line_comment(pos, v, &events) => {
-                events.push(Events::StartLineComment(pos));
-                pos += 1;
-            }
-            b'\n' if previous_is_line_comment(&events) => {
-                events.push(Events::EndComment(pos));
-            }
-            b'*' if pos + 1 < v.len() && v[pos + 1] == b'/' => {
-                events.push(Events::EndComment(pos + 2));
-                pos += 1;
-            }
-            b'{' if !previous_is_line_comment(&events) => {
-                if let Some(&Events::StartComment(_)) = events.last() {
-                    pos += 1;
-                    continue
-                }
-                events.push(Events::InBlock(pos + 1));
-            }
-            b'}' if !previous_is_line_comment(&events) => {
-                if let Some(&Events::StartComment(_)) = events.last() {
-                    pos += 1;
-                    continue
-                }
-                events.push(Events::OutBlock(pos + 1));
-            }
-            _ => {}
-        }
-        pos += 1;
-    }
-    events
-}
-
-fn get_useful_next(events: &[Events], pos: &mut usize) -> Option<Events> {
-    while *pos < events.len() {
-        if !events[*pos].is_comment() {
-            return Some(events[*pos]);
-        }
-        *pos += 1;
-    }
-    None
-}
-
-fn get_previous_positions(events: &[Events], mut pos: usize) -> Vec<usize> {
-    let mut ret = Vec::with_capacity(3);
-
-    ret.push(events[pos].get_pos());
-    if pos > 0 {
-        pos -= 1;
-    }
-    loop {
-        if pos < 1 || !events[pos].is_comment() {
-            let x = events[pos].get_pos();
-            if *ret.last().unwrap() != x {
-                ret.push(x);
-            } else {
-                ret.push(0);
-            }
-            break
-        }
-        ret.push(events[pos].get_pos());
-        pos -= 1;
-    }
-    if ret.len() & 1 != 0 && events[pos].is_comment() {
-        ret.push(0);
-    }
-    ret.iter().rev().cloned().collect()
-}
-
-fn build_rule(v: &[u8], positions: &[usize]) -> String {
-    positions.chunks(2)
-             .map(|x| ::std::str::from_utf8(&v[x[0]..x[1]]).unwrap_or(""))
-             .collect::<String>()
-             .trim()
-             .replace("\n", " ")
-             .replace("/", "")
-             .replace("\t", " ")
-             .replace("{", "")
-             .replace("}", "")
-             .split(' ')
-             .filter(|s| s.len() > 0)
-             .collect::<Vec<&str>>()
-             .join(" ")
-}
-
-fn inner(v: &[u8], events: &[Events], pos: &mut usize) -> FxHashSet<CssPath> {
-    let mut paths = Vec::with_capacity(50);
-
-    while *pos < events.len() {
-        if let Some(Events::OutBlock(_)) = get_useful_next(events, pos) {
-            *pos += 1;
-            break
-        }
-        if let Some(Events::InBlock(_)) = get_useful_next(events, pos) {
-            paths.push(CssPath::new(build_rule(v, &get_previous_positions(events, *pos))));
-            *pos += 1;
-        }
-        while let Some(Events::InBlock(_)) = get_useful_next(events, pos) {
-            if let Some(ref mut path) = paths.last_mut() {
-                for entry in inner(v, events, pos).iter() {
-                    path.children.insert(entry.clone());
-                }
-            }
-        }
-        if let Some(Events::OutBlock(_)) = get_useful_next(events, pos) {
-            *pos += 1;
-        }
-    }
-    paths.iter().cloned().collect()
-}
-
-pub fn load_css_paths(v: &[u8]) -> CssPath {
-    let events = load_css_events(v);
-    let mut pos = 0;
-
-    let mut parent = CssPath::new("parent".to_owned());
-    parent.children = inner(v, &events, &mut pos);
-    parent
-}
-
-pub fn get_differences(against: &CssPath, other: &CssPath, v: &mut Vec<String>) {
-    if against.name != other.name {
-        return
-    } else {
-        for child in &against.children {
-            let mut found = false;
-            let mut found_working = false;
-            let mut tmp = Vec::new();
-
-            for other_child in &other.children {
-                if child.name == other_child.name {
-                    if child != other_child {
-                        get_differences(child, other_child, &mut tmp);
-                    } else {
-                        found_working = true;
-                    }
-                    found = true;
-                    break
-                }
-            }
-            if found == false {
-                v.push(format!("  Missing \"{}\" rule", child.name));
-            } else if found_working == false {
-                v.extend(tmp.iter().cloned());
-            }
-        }
-    }
-}
-
-pub fn test_theme_against<P: AsRef<Path>>(f: &P, against: &CssPath, diag: &Handler)
-    -> (bool, Vec<String>)
-{
-    let data = try_something!(fs::read(f), diag, (false, vec![]));
-    let paths = load_css_paths(&data);
-    let mut ret = vec![];
-    get_differences(against, &paths, &mut ret);
-    (true, ret)
-}
+use rustc_data_structures::fx::{FxIndexMap, IndexEntry};
+use rustc_errors::DiagCtxtHandle;
 
 #[cfg(test)]
-mod test {
-    use super::*;
+mod tests;
 
-    #[test]
-    fn test_comments_in_rules() {
-        let text = r#"
-rule a {}
+#[derive(Debug)]
+pub(crate) struct CssPath {
+    pub(crate) rules: FxIndexMap<String, String>,
+    pub(crate) children: FxIndexMap<String, CssPath>,
+}
 
-rule b, c
-// a line comment
-{}
-
-rule d
-// another line comment
-e {}
-
-rule f/* a multine
-
-comment*/{}
-
-rule g/* another multine
-
-comment*/h
-
-i {}
-
-rule j/*commeeeeent
-
-you like things like "{}" in there? :)
-*/
-end {}"#;
-
-        let against = r#"
-rule a {}
-
-rule b, c {}
-
-rule d e {}
-
-rule f {}
-
-rule gh i {}
-
-rule j end {}
-"#;
-
-        let mut ret = Vec::new();
-        get_differences(&load_css_paths(against.as_bytes()),
-                        &load_css_paths(text.as_bytes()),
-                        &mut ret);
-        assert!(ret.is_empty());
-    }
-
-    #[test]
-    fn test_text() {
-        let text = r#"
-a
-/* sdfs
-*/ b
-c // sdf
-d {}
-"#;
-        let paths = load_css_paths(text.as_bytes());
-        assert!(paths.children.contains(&CssPath::new("a b c d".to_owned())));
-    }
-
-    #[test]
-    fn test_comparison() {
-        let x = r#"
-a {
-    b {
-        c {}
+/// When encountering a `"` or a `'`, returns the whole string, including the quote characters.
+fn get_string(iter: &mut Peekable<Chars<'_>>, string_start: char, buffer: &mut String) {
+    buffer.push(string_start);
+    while let Some(c) = iter.next() {
+        buffer.push(c);
+        if c == '\\' {
+            iter.next();
+        } else if c == string_start {
+            break;
+        }
     }
 }
-"#;
 
-        let y = r#"
-a {
-    b {}
-}
-"#;
-
-        let against = load_css_paths(y.as_bytes());
-        let other = load_css_paths(x.as_bytes());
-
-        let mut ret = Vec::new();
-        get_differences(&against, &other, &mut ret);
-        assert!(ret.is_empty());
-        get_differences(&other, &against, &mut ret);
-        assert_eq!(ret, vec!["  Missing \"c\" rule".to_owned()]);
+fn get_inside_paren(
+    iter: &mut Peekable<Chars<'_>>,
+    paren_start: char,
+    paren_end: char,
+    buffer: &mut String,
+) {
+    buffer.push(paren_start);
+    while let Some(c) = iter.next() {
+        handle_common_chars(c, buffer, iter);
+        if c == paren_end {
+            break;
+        }
     }
+}
+
+/// Skips a `/*` comment.
+fn skip_comment(iter: &mut Peekable<Chars<'_>>) {
+    while let Some(c) = iter.next() {
+        if c == '*' && iter.next() == Some('/') {
+            break;
+        }
+    }
+}
+
+/// Skips a line comment (`//`).
+fn skip_line_comment(iter: &mut Peekable<Chars<'_>>) {
+    for c in iter.by_ref() {
+        if c == '\n' {
+            break;
+        }
+    }
+}
+
+fn handle_common_chars(c: char, buffer: &mut String, iter: &mut Peekable<Chars<'_>>) {
+    match c {
+        '"' | '\'' => get_string(iter, c, buffer),
+        '/' if iter.peek() == Some(&'*') => skip_comment(iter),
+        '/' if iter.peek() == Some(&'/') => skip_line_comment(iter),
+        '(' => get_inside_paren(iter, c, ')', buffer),
+        '[' => get_inside_paren(iter, c, ']', buffer),
+        _ => buffer.push(c),
+    }
+}
+
+/// Returns a CSS property name. Ends when encountering a `:` character.
+///
+/// If the `:` character isn't found, returns `None`.
+///
+/// If a `{` character is encountered, returns an error.
+fn parse_property_name(iter: &mut Peekable<Chars<'_>>) -> Result<Option<String>, String> {
+    let mut content = String::new();
+
+    while let Some(c) = iter.next() {
+        match c {
+            ':' => return Ok(Some(content.trim().to_owned())),
+            '{' => return Err("Unexpected `{` in a `{}` block".to_owned()),
+            '}' => break,
+            _ => handle_common_chars(c, &mut content, iter),
+        }
+    }
+    Ok(None)
+}
+
+/// Try to get the value of a CSS property (the `#fff` in `color: #fff`). It'll stop when it
+/// encounters a `{` or a `;` character.
+///
+/// It returns the value string and a boolean set to `true` if the value is ended with a `}` because
+/// it means that the parent block is done and that we should notify the parent caller.
+fn parse_property_value(iter: &mut Peekable<Chars<'_>>) -> (String, bool) {
+    let mut value = String::new();
+    let mut out_block = false;
+
+    while let Some(c) = iter.next() {
+        match c {
+            ';' => break,
+            '}' => {
+                out_block = true;
+                break;
+            }
+            _ => handle_common_chars(c, &mut value, iter),
+        }
+    }
+    (value.trim().to_owned(), out_block)
+}
+
+/// This is used to parse inside a CSS `{}` block. If we encounter a new `{` inside it, we consider
+/// it as a new block and therefore recurse into `parse_rules`.
+fn parse_rules(
+    content: &str,
+    selector: String,
+    iter: &mut Peekable<Chars<'_>>,
+    paths: &mut FxIndexMap<String, CssPath>,
+) -> Result<(), String> {
+    let mut rules = FxIndexMap::default();
+    let mut children = FxIndexMap::default();
+
+    loop {
+        // If the parent isn't a "normal" CSS selector, we only expect sub-selectors and not CSS
+        // properties.
+        if selector.starts_with('@') {
+            parse_selectors(content, iter, &mut children)?;
+            break;
+        }
+        let rule = match parse_property_name(iter)? {
+            Some(r) => {
+                if r.is_empty() {
+                    return Err(format!("Found empty rule in selector `{selector}`"));
+                }
+                r
+            }
+            None => break,
+        };
+        let (value, out_block) = parse_property_value(iter);
+        if value.is_empty() {
+            return Err(format!("Found empty value for rule `{rule}` in selector `{selector}`"));
+        }
+        match rules.entry(rule) {
+            IndexEntry::Occupied(mut o) => {
+                *o.get_mut() = value;
+            }
+            IndexEntry::Vacant(v) => {
+                v.insert(value);
+            }
+        }
+        if out_block {
+            break;
+        }
+    }
+
+    match paths.entry(selector) {
+        IndexEntry::Occupied(mut o) => {
+            let v = o.get_mut();
+            for (key, value) in rules.into_iter() {
+                v.rules.insert(key, value);
+            }
+            for (sel, child) in children.into_iter() {
+                v.children.insert(sel, child);
+            }
+        }
+        IndexEntry::Vacant(v) => {
+            v.insert(CssPath { rules, children });
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn parse_selectors(
+    content: &str,
+    iter: &mut Peekable<Chars<'_>>,
+    paths: &mut FxIndexMap<String, CssPath>,
+) -> Result<(), String> {
+    let mut selector = String::new();
+
+    while let Some(c) = iter.next() {
+        match c {
+            '{' => {
+                if selector.trim().starts_with(":root[data-theme") {
+                    selector = String::from(":root");
+                }
+                let s = minifier::css::minify(selector.trim()).map(|s| s.to_string())?;
+                parse_rules(content, s, iter, paths)?;
+                selector.clear();
+            }
+            '}' => break,
+            ';' => selector.clear(), // We don't handle inline selectors like `@import`.
+            _ => handle_common_chars(c, &mut selector, iter),
+        }
+    }
+    Ok(())
+}
+
+/// The entry point to parse the CSS rules. Every time we encounter a `{`, we then parse the rules
+/// inside it.
+pub(crate) fn load_css_paths(content: &str) -> Result<FxIndexMap<String, CssPath>, String> {
+    let mut iter = content.chars().peekable();
+    let mut paths = FxIndexMap::default();
+
+    parse_selectors(content, &mut iter, &mut paths)?;
+    Ok(paths)
+}
+
+pub(crate) fn get_differences(
+    origin: &FxIndexMap<String, CssPath>,
+    against: &FxIndexMap<String, CssPath>,
+    v: &mut Vec<String>,
+) {
+    for (selector, entry) in origin.iter() {
+        match against.get(selector) {
+            Some(a) => {
+                get_differences(&entry.children, &a.children, v);
+                if selector == ":root" {
+                    // We need to check that all variables have been set.
+                    for rule in entry.rules.keys() {
+                        if !a.rules.contains_key(rule) {
+                            v.push(format!("  Missing CSS variable `{rule}` in `:root`"));
+                        }
+                    }
+                }
+            }
+            None => v.push(format!("  Missing rule `{selector}`")),
+        }
+    }
+}
+
+pub(crate) fn test_theme_against<P: AsRef<Path>>(
+    f: &P,
+    origin: &FxIndexMap<String, CssPath>,
+    dcx: DiagCtxtHandle<'_>,
+) -> (bool, Vec<String>) {
+    let against = match fs::read_to_string(f)
+        .map_err(|e| e.to_string())
+        .and_then(|data| load_css_paths(&data))
+    {
+        Ok(c) => c,
+        Err(e) => {
+            dcx.err(e);
+            return (false, vec![]);
+        }
+    };
+
+    let mut ret = vec![];
+    get_differences(origin, &against, &mut ret);
+    (true, ret)
 }

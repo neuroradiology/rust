@@ -11,7 +11,8 @@ This implements [RFC1909]. When turned on, you can have unsized arguments and lo
 [RFC1909]: https://github.com/rust-lang/rfcs/blob/master/text/1909-unsized-rvalues.md
 
 ```rust
-#![feature(unsized_locals)]
+#![allow(incomplete_features)]
+#![feature(unsized_locals, unsized_fn_params)]
 
 use std::any::Any;
 
@@ -29,7 +30,7 @@ fn foo(_: dyn Any) {}
 
 The RFC still forbids the following unsized expressions:
 
-```rust,ignore
+```rust,compile_fail
 #![feature(unsized_locals)]
 
 use std::any::Any;
@@ -85,7 +86,7 @@ fn main() {
 With this feature, you can have by-value `self` arguments without `Self: Sized` bounds.
 
 ```rust
-#![feature(unsized_locals)]
+#![feature(unsized_fn_params)]
 
 trait Foo {
     fn foo(self) {}
@@ -102,7 +103,7 @@ fn main() {
 And `Foo` will also be object-safe.
 
 ```rust
-#![feature(unsized_locals)]
+#![feature(unsized_fn_params)]
 
 trait Foo {
     fn foo(self) {}
@@ -117,15 +118,13 @@ fn main () {
 }
 ```
 
-One of the objectives of this feature is to allow `Box<dyn FnOnce>`, instead of `Box<dyn FnBox>` in the future. See [#28796] for details.
-
-[#28796]: https://github.com/rust-lang/rust/issues/28796
+One of the objectives of this feature is to allow `Box<dyn FnOnce>`.
 
 ## Variable length arrays
 
 The RFC also describes an extension to the array literal syntax: `[e; dyn n]`. In the syntax, `n` isn't necessarily a constant expression. The array is dynamically allocated on the stack and has the type of `[T]`, instead of `[T; n]`.
 
-```rust,ignore
+```rust,ignore (not-yet-implemented)
 #![feature(unsized_locals)]
 
 fn mergesort<T: Ord>(a: &mut [T]) {

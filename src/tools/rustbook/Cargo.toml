@@ -1,21 +1,20 @@
+[workspace]
+members = ["../error_index_generator"]
+
 [package]
-authors = ["The Rust Project Developers"]
 name = "rustbook"
 version = "0.1.0"
-license = "MIT/Apache-2.0"
-edition = "2018"
+license = "MIT OR Apache-2.0"
+edition = "2021"
 
 [dependencies]
-clap = "2.25.0"
+clap = "4.0.32"
+env_logger = "0.11"
+mdbook-trpl = { path = "../../doc/book/packages/mdbook-trpl" }
+mdbook-i18n-helpers = "0.3.3"
+mdbook-spec = { path = "../../doc/reference/mdbook-spec" }
 
-[dependencies.mdbook_2]
-package = "mdbook"
-version = "0.2.3"
-default-features = false
-features = ["search"]
-
-[dependencies.mdbook_1]
-package = "mdbook"
-version = "0.1.7"
+[dependencies.mdbook]
+version = "0.4.49"
 default-features = false
 features = ["search"]

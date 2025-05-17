@@ -1,14 +1,8 @@
-This directory contains the source code of the rust project, including:
-- `rustc` and its tests
-- `libstd`
-- Various submodules for tools, like rustdoc, rls, etc.
+This directory contains some source code for the Rust project, including:
 
-For more information on how various parts of the compiler work, see the [rustc guide].
+- The bootstrapping build system
+- Various submodules for tools, like cargo, tidy, etc.
 
-There is also useful content in the following READMEs, which are gradually being moved over to the guide:
-- https://github.com/rust-lang/rust/tree/master/src/librustc/ty/query
-- https://github.com/rust-lang/rust/tree/master/src/librustc/dep_graph
-- https://github.com/rust-lang/rust/tree/master/src/librustc/infer/higher_ranked
-- https://github.com/rust-lang/rust/tree/master/src/librustc/infer/lexical_region_resolve
+For more information on how various parts of the compiler work, see the [rustc dev guide].
 
-[rustc guide]: https://rust-lang.github.io/rustc-guide/about-this-guide.html
+[rustc dev guide]: https://rustc-dev-guide.rust-lang.org/about-this-guide.html

@@ -1,219 +1,424 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::ffi::OsStr;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::{fmt, io};
 
-use errors;
-use errors::emitter::ColorConfig;
-use getopts;
-use rustc::lint::Level;
-use rustc::session::early_error;
-use rustc::session::config::{CodegenOptions, DebuggingOptions, ErrorOutputType, Externs};
-use rustc::session::config::{nightly_options, build_codegen_options, build_debugging_options,
-                             get_cmd_lint_options};
-use rustc::session::search_paths::SearchPath;
-use rustc_driver;
-use rustc_target::spec::TargetTriple;
-use syntax::edition::Edition;
+use rustc_data_structures::fx::FxIndexMap;
+use rustc_errors::DiagCtxtHandle;
+use rustc_session::config::{
+    self, CodegenOptions, CrateType, ErrorOutputType, Externs, Input, JsonUnusedExterns,
+    OptionsTargetModifiers, UnstableOptions, get_cmd_lint_options, nightly_options,
+    parse_crate_types_from_list, parse_externs, parse_target_triple,
+};
+use rustc_session::lint::Level;
+use rustc_session::search_paths::SearchPath;
+use rustc_session::{EarlyDiagCtxt, getopts};
+use rustc_span::FileName;
+use rustc_span::edition::Edition;
+use rustc_target::spec::TargetTuple;
 
-use crate::core::new_handler;
+use crate::core::new_dcx;
 use crate::externalfiles::ExternalHtml;
-use crate::html;
-use crate::html::{static_files};
-use crate::html::markdown::{IdMap};
-use crate::opts;
-use crate::passes::{self, DefaultPassOption};
-use crate::theme;
+use crate::html::markdown::IdMap;
+use crate::html::render::StylePath;
+use crate::html::static_files;
+use crate::passes::{self, Condition};
+use crate::scrape_examples::{AllCallLocations, ScrapeExamplesOptions};
+use crate::{html, opts, theme};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum OutputFormat {
+    Json,
+    #[default]
+    Html,
+    Doctest,
+}
+
+impl OutputFormat {
+    pub(crate) fn is_json(&self) -> bool {
+        matches!(self, OutputFormat::Json)
+    }
+}
+
+impl TryFrom<&str> for OutputFormat {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "json" => Ok(OutputFormat::Json),
+            "html" => Ok(OutputFormat::Html),
+            "doctest" => Ok(OutputFormat::Doctest),
+            _ => Err(format!("unknown output format `{value}`")),
+        }
+    }
+}
+
+/// Either an input crate, markdown file, or nothing (--merge=finalize).
+pub(crate) enum InputMode {
+    /// The `--merge=finalize` step does not need an input crate to rustdoc.
+    NoInputMergeFinalize,
+    /// A crate or markdown file.
+    HasFile(Input),
+}
 
 /// Configuration options for rustdoc.
 #[derive(Clone)]
-pub struct Options {
+pub(crate) struct Options {
     // Basic options / Options passed directly to rustc
-
-    /// The crate root or Markdown file to load.
-    pub input: PathBuf,
     /// The name of the crate being documented.
-    pub crate_name: Option<String>,
+    pub(crate) crate_name: Option<String>,
+    /// Whether or not this is a bin crate
+    pub(crate) bin_crate: bool,
+    /// Whether or not this is a proc-macro crate
+    pub(crate) proc_macro_crate: bool,
     /// How to format errors and warnings.
-    pub error_format: ErrorOutputType,
+    pub(crate) error_format: ErrorOutputType,
+    /// Width of output buffer to truncate errors appropriately.
+    pub(crate) diagnostic_width: Option<usize>,
     /// Library search paths to hand to the compiler.
-    pub libs: Vec<SearchPath>,
+    pub(crate) libs: Vec<SearchPath>,
+    /// Library search paths strings to hand to the compiler.
+    pub(crate) lib_strs: Vec<String>,
     /// The list of external crates to link against.
-    pub externs: Externs,
+    pub(crate) externs: Externs,
+    /// The list of external crates strings to link against.
+    pub(crate) extern_strs: Vec<String>,
     /// List of `cfg` flags to hand to the compiler. Always includes `rustdoc`.
-    pub cfgs: Vec<String>,
+    pub(crate) cfgs: Vec<String>,
+    /// List of check cfg flags to hand to the compiler.
+    pub(crate) check_cfgs: Vec<String>,
     /// Codegen options to hand to the compiler.
-    pub codegen_options: CodegenOptions,
-    /// Debugging (`-Z`) options to pass to the compiler.
-    pub debugging_options: DebuggingOptions,
+    pub(crate) codegen_options: CodegenOptions,
+    /// Codegen options strings to hand to the compiler.
+    pub(crate) codegen_options_strs: Vec<String>,
+    /// Unstable (`-Z`) options to pass to the compiler.
+    pub(crate) unstable_opts: UnstableOptions,
+    /// Unstable (`-Z`) options strings to pass to the compiler.
+    pub(crate) unstable_opts_strs: Vec<String>,
     /// The target used to compile the crate against.
-    pub target: Option<TargetTriple>,
+    pub(crate) target: TargetTuple,
     /// Edition used when reading the crate. Defaults to "2015". Also used by default when
     /// compiling doctests from the crate.
-    pub edition: Edition,
+    pub(crate) edition: Edition,
     /// The path to the sysroot. Used during the compilation process.
-    pub maybe_sysroot: Option<PathBuf>,
-    /// Linker to use when building doctests.
-    pub linker: Option<PathBuf>,
+    pub(crate) sysroot: PathBuf,
+    /// Has the same value as `sysroot` except is `None` when the user didn't pass `---sysroot`.
+    pub(crate) maybe_sysroot: Option<PathBuf>,
     /// Lint information passed over the command-line.
-    pub lint_opts: Vec<(String, Level)>,
-    /// Whether to ask rustc to describe the lints it knows. Practically speaking, this will not be
-    /// used, since we abort if we have no input file, but it's included for completeness.
-    pub describe_lints: bool,
+    pub(crate) lint_opts: Vec<(String, Level)>,
+    /// Whether to ask rustc to describe the lints it knows.
+    pub(crate) describe_lints: bool,
     /// What level to cap lints at.
-    pub lint_cap: Option<Level>,
+    pub(crate) lint_cap: Option<Level>,
 
     // Options specific to running doctests
-
     /// Whether we should run doctests instead of generating docs.
-    pub should_test: bool,
+    pub(crate) should_test: bool,
     /// List of arguments to pass to the test harness, if running tests.
-    pub test_args: Vec<String>,
+    pub(crate) test_args: Vec<String>,
+    /// The working directory in which to run tests.
+    pub(crate) test_run_directory: Option<PathBuf>,
     /// Optional path to persist the doctest executables to, defaults to a
     /// temporary directory if not set.
-    pub persist_doctests: Option<PathBuf>,
+    pub(crate) persist_doctests: Option<PathBuf>,
+    /// Runtool to run doctests with
+    pub(crate) test_runtool: Option<String>,
+    /// Arguments to pass to the runtool
+    pub(crate) test_runtool_args: Vec<String>,
+    /// Do not run doctests, compile them if should_test is active.
+    pub(crate) no_run: bool,
+    /// What sources are being mapped.
+    pub(crate) remap_path_prefix: Vec<(PathBuf, PathBuf)>,
+
+    /// The path to a rustc-like binary to build tests with. If not set, we
+    /// default to loading from `$sysroot/bin/rustc`.
+    pub(crate) test_builder: Option<PathBuf>,
+
+    /// Run these wrapper instead of rustc directly
+    pub(crate) test_builder_wrappers: Vec<PathBuf>,
 
     // Options that affect the documentation process
-
-    /// The selected default set of passes to use.
-    ///
-    /// Be aware: This option can come both from the CLI and from crate attributes!
-    pub default_passes: DefaultPassOption,
-    /// Any passes manually selected by the user.
-    ///
-    /// Be aware: This option can come both from the CLI and from crate attributes!
-    pub manual_passes: Vec<String>,
-    /// Whether to display warnings during doc generation or while gathering doctests. By default,
-    /// all non-rustdoc-specific lints are allowed when generating docs.
-    pub display_warnings: bool,
     /// Whether to run the `calculate-doc-coverage` pass, which counts the number of public items
     /// with and without documentation.
-    pub show_coverage: bool,
+    pub(crate) show_coverage: bool,
 
     // Options that alter generated documentation pages
-
     /// Crate version to note on the sidebar of generated docs.
-    pub crate_version: Option<String>,
-    /// Collected options specific to outputting final pages.
-    pub render_options: RenderOptions,
+    pub(crate) crate_version: Option<String>,
+    /// The format that we output when rendering.
+    ///
+    /// Currently used only for the `--show-coverage` option.
+    pub(crate) output_format: OutputFormat,
+    /// If this option is set to `true`, rustdoc will only run checks and not generate
+    /// documentation.
+    pub(crate) run_check: bool,
+    /// Whether doctests should emit unused externs
+    pub(crate) json_unused_externs: JsonUnusedExterns,
+    /// Whether to skip capturing stdout and stderr of tests.
+    pub(crate) nocapture: bool,
+
+    /// Configuration for scraping examples from the current crate. If this option is Some(..) then
+    /// the compiler will scrape examples and not generate documentation.
+    pub(crate) scrape_examples_options: Option<ScrapeExamplesOptions>,
+
+    /// Note: this field is duplicated in `RenderOptions` because it's useful
+    /// to have it in both places.
+    pub(crate) unstable_features: rustc_feature::UnstableFeatures,
+
+    /// All commandline args used to invoke the compiler, with @file args fully expanded.
+    /// This will only be used within debug info, e.g. in the pdb file on windows
+    /// This is mainly useful for other tools that reads that debuginfo to figure out
+    /// how to call the compiler with the same arguments.
+    pub(crate) expanded_args: Vec<String>,
+
+    /// Arguments to be used when compiling doctests.
+    pub(crate) doctest_build_args: Vec<String>,
 }
 
 impl fmt::Debug for Options {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         struct FmtExterns<'a>(&'a Externs);
 
-        impl<'a> fmt::Debug for FmtExterns<'a> {
+        impl fmt::Debug for FmtExterns<'_> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.debug_map()
-                    .entries(self.0.iter())
-                    .finish()
+                f.debug_map().entries(self.0.iter()).finish()
             }
         }
 
         f.debug_struct("Options")
-            .field("input", &self.input)
             .field("crate_name", &self.crate_name)
+            .field("bin_crate", &self.bin_crate)
+            .field("proc_macro_crate", &self.proc_macro_crate)
             .field("error_format", &self.error_format)
             .field("libs", &self.libs)
             .field("externs", &FmtExterns(&self.externs))
             .field("cfgs", &self.cfgs)
+            .field("check-cfgs", &self.check_cfgs)
             .field("codegen_options", &"...")
-            .field("debugging_options", &"...")
+            .field("unstable_options", &"...")
             .field("target", &self.target)
             .field("edition", &self.edition)
+            .field("sysroot", &self.sysroot)
             .field("maybe_sysroot", &self.maybe_sysroot)
-            .field("linker", &self.linker)
             .field("lint_opts", &self.lint_opts)
             .field("describe_lints", &self.describe_lints)
             .field("lint_cap", &self.lint_cap)
             .field("should_test", &self.should_test)
             .field("test_args", &self.test_args)
+            .field("test_run_directory", &self.test_run_directory)
             .field("persist_doctests", &self.persist_doctests)
-            .field("default_passes", &self.default_passes)
-            .field("manual_passes", &self.manual_passes)
-            .field("display_warnings", &self.display_warnings)
             .field("show_coverage", &self.show_coverage)
             .field("crate_version", &self.crate_version)
-            .field("render_options", &self.render_options)
+            .field("test_runtool", &self.test_runtool)
+            .field("test_runtool_args", &self.test_runtool_args)
+            .field("run_check", &self.run_check)
+            .field("no_run", &self.no_run)
+            .field("test_builder_wrappers", &self.test_builder_wrappers)
+            .field("remap-file-prefix", &self.remap_path_prefix)
+            .field("nocapture", &self.nocapture)
+            .field("scrape_examples_options", &self.scrape_examples_options)
+            .field("unstable_features", &self.unstable_features)
             .finish()
     }
 }
 
 /// Configuration options for the HTML page-creation process.
 #[derive(Clone, Debug)]
-pub struct RenderOptions {
+pub(crate) struct RenderOptions {
     /// Output directory to generate docs into. Defaults to `doc`.
-    pub output: PathBuf,
+    pub(crate) output: PathBuf,
     /// External files to insert into generated pages.
-    pub external_html: ExternalHtml,
+    pub(crate) external_html: ExternalHtml,
     /// A pre-populated `IdMap` with the default headings and any headings added by Markdown files
     /// processed by `external_html`.
-    pub id_map: IdMap,
+    pub(crate) id_map: IdMap,
     /// If present, playground URL to use in the "Run" button added to code samples.
     ///
     /// Be aware: This option can come both from the CLI and from crate attributes!
-    pub playground_url: Option<String>,
-    /// Whether to sort modules alphabetically on a module page instead of using declaration order.
-    /// `true` by default.
-    //
-    // FIXME(misdreavus): the flag name is `--sort-modules-by-appearance` but the meaning is
-    // inverted once read.
-    pub sort_modules_alphabetically: bool,
+    pub(crate) playground_url: Option<String>,
+    /// What sorting mode to use for module pages.
+    /// `ModuleSorting::Alphabetical` by default.
+    pub(crate) module_sorting: ModuleSorting,
     /// List of themes to extend the docs with. Original argument name is included to assist in
     /// displaying errors if it fails a theme check.
-    pub themes: Vec<PathBuf>,
+    pub(crate) themes: Vec<StylePath>,
     /// If present, CSS file that contains rules to add to the default CSS.
-    pub extension_css: Option<PathBuf>,
+    pub(crate) extension_css: Option<PathBuf>,
     /// A map of crate names to the URL to use instead of querying the crate's `html_root_url`.
-    pub extern_html_root_urls: BTreeMap<String, String>,
+    pub(crate) extern_html_root_urls: BTreeMap<String, String>,
+    /// Whether to give precedence to `html_root_url` or `--extern-html-root-url`.
+    pub(crate) extern_html_root_takes_precedence: bool,
+    /// A map of the default settings (values are as for DOM storage API). Keys should lack the
+    /// `rustdoc-` prefix.
+    pub(crate) default_settings: FxIndexMap<String, String>,
     /// If present, suffix added to CSS/JavaScript files when referencing them in generated pages.
-    pub resource_suffix: String,
-    /// Whether to run the static CSS/JavaScript through a minifier when outputting them. `true` by
-    /// default.
-    //
-    // FIXME(misdreavus): the flag name is `--disable-minification` but the meaning is inverted
-    // once read.
-    pub enable_minification: bool,
+    pub(crate) resource_suffix: String,
     /// Whether to create an index page in the root of the output directory. If this is true but
     /// `enable_index_page` is None, generate a static listing of crates instead.
-    pub enable_index_page: bool,
+    pub(crate) enable_index_page: bool,
     /// A file to use as the index page at the root of the output directory. Overrides
     /// `enable_index_page` to be true if set.
-    pub index_page: Option<PathBuf>,
+    pub(crate) index_page: Option<PathBuf>,
     /// An optional path to use as the location of static files. If not set, uses combinations of
     /// `../` to reach the documentation root.
-    pub static_root_path: Option<String>,
+    pub(crate) static_root_path: Option<String>,
 
     // Options specific to reading standalone Markdown files
-
     /// Whether to generate a table of contents on the output file when reading a standalone
     /// Markdown file.
-    pub markdown_no_toc: bool,
+    pub(crate) markdown_no_toc: bool,
     /// Additional CSS files to link in pages generated from standalone Markdown files.
-    pub markdown_css: Vec<String>,
+    pub(crate) markdown_css: Vec<String>,
     /// If present, playground URL to use in the "Run" button added to code samples generated from
     /// standalone Markdown files. If not present, `playground_url` is used.
-    pub markdown_playground_url: Option<String>,
-    /// If false, the `select` element to have search filtering by crates on rendered docs
-    /// won't be generated.
-    pub generate_search_filter: bool,
-    /// Option (disabled by default) to generate files used by RLS and some other tools.
-    pub generate_redirect_pages: bool,
+    pub(crate) markdown_playground_url: Option<String>,
+    /// Document items that have lower than `pub` visibility.
+    pub(crate) document_private: bool,
+    /// Document items that have `doc(hidden)`.
+    pub(crate) document_hidden: bool,
+    /// If `true`, generate a JSON file in the crate folder instead of HTML redirection files.
+    pub(crate) generate_redirect_map: bool,
+    /// Show the memory layout of types in the docs.
+    pub(crate) show_type_layout: bool,
+    /// Note: this field is duplicated in `Options` because it's useful to have
+    /// it in both places.
+    pub(crate) unstable_features: rustc_feature::UnstableFeatures,
+    pub(crate) emit: Vec<EmitType>,
+    /// If `true`, HTML source pages will generate links for items to their definition.
+    pub(crate) generate_link_to_definition: bool,
+    /// Set of function-call locations to include as examples
+    pub(crate) call_locations: AllCallLocations,
+    /// If `true`, Context::init will not emit shared files.
+    pub(crate) no_emit_shared: bool,
+    /// If `true`, HTML source code pages won't be generated.
+    pub(crate) html_no_source: bool,
+    /// This field is only used for the JSON output. If it's set to true, no file will be created
+    /// and content will be displayed in stdout directly.
+    pub(crate) output_to_stdout: bool,
+    /// Whether we should read or write rendered cross-crate info in the doc root.
+    pub(crate) should_merge: ShouldMerge,
+    /// Path to crate-info for external crates.
+    pub(crate) include_parts_dir: Vec<PathToParts>,
+    /// Where to write crate-info
+    pub(crate) parts_out_dir: Option<PathToParts>,
+    /// disable minification of CSS/JS
+    pub(crate) disable_minification: bool,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ModuleSorting {
+    DeclarationOrder,
+    Alphabetical,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum EmitType {
+    Unversioned,
+    Toolchain,
+    InvocationSpecific,
+    DepInfo(Option<PathBuf>),
+}
+
+impl FromStr for EmitType {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "unversioned-shared-resources" => Ok(Self::Unversioned),
+            "toolchain-shared-resources" => Ok(Self::Toolchain),
+            "invocation-specific" => Ok(Self::InvocationSpecific),
+            "dep-info" => Ok(Self::DepInfo(None)),
+            option => {
+                if let Some(file) = option.strip_prefix("dep-info=") {
+                    Ok(Self::DepInfo(Some(Path::new(file).into())))
+                } else {
+                    Err(())
+                }
+            }
+        }
+    }
+}
+
+impl RenderOptions {
+    pub(crate) fn should_emit_crate(&self) -> bool {
+        self.emit.is_empty() || self.emit.contains(&EmitType::InvocationSpecific)
+    }
+
+    pub(crate) fn dep_info(&self) -> Option<Option<&Path>> {
+        for emit in &self.emit {
+            if let EmitType::DepInfo(file) = emit {
+                return Some(file.as_deref());
+            }
+        }
+        None
+    }
+}
+
+/// Create the input (string or file path)
+///
+/// Warning: Return an unrecoverable error in case of error!
+fn make_input(early_dcx: &EarlyDiagCtxt, input: &str) -> Input {
+    if input == "-" {
+        let mut src = String::new();
+        if io::stdin().read_to_string(&mut src).is_err() {
+            // Immediately stop compilation if there was an issue reading
+            // the input (for example if the input stream is not UTF-8).
+            early_dcx.early_fatal("couldn't read from stdin, as it did not contain valid UTF-8");
+        }
+        Input::Str { name: FileName::anon_source_code(&src), input: src }
+    } else {
+        Input::File(PathBuf::from(input))
+    }
 }
 
 impl Options {
     /// Parses the given command-line for options. If an error message or other early-return has
     /// been printed, returns `Err` with the exit code.
-    pub fn from_matches(matches: &getopts::Matches) -> Result<Options, i32> {
+    pub(crate) fn from_matches(
+        early_dcx: &mut EarlyDiagCtxt,
+        matches: &getopts::Matches,
+        args: Vec<String>,
+    ) -> Option<(InputMode, Options, RenderOptions)> {
         // Check for unstable options.
-        nightly_options::check_nightly_options(&matches, &opts());
+        nightly_options::check_nightly_options(early_dcx, matches, &opts());
 
-        if matches.opt_present("h") || matches.opt_present("help") {
+        if args.is_empty() || matches.opt_present("h") || matches.opt_present("help") {
             crate::usage("rustdoc");
-            return Err(0);
+            return None;
         } else if matches.opt_present("version") {
-            rustc_driver::version("rustdoc", &matches);
-            return Err(0);
+            rustc_driver::version!(&early_dcx, "rustdoc", matches);
+            return None;
         }
+
+        if rustc_driver::describe_flag_categories(early_dcx, matches) {
+            return None;
+        }
+
+        let color = config::parse_color(early_dcx, matches);
+        let config::JsonConfig { json_rendered, json_unused_externs, json_color, .. } =
+            config::parse_json(early_dcx, matches);
+        let error_format =
+            config::parse_error_format(early_dcx, matches, color, json_color, json_rendered);
+        let diagnostic_width = matches.opt_get("diagnostic-width").unwrap_or_default();
+
+        let mut target_modifiers = BTreeMap::<OptionsTargetModifiers, String>::new();
+        let codegen_options = CodegenOptions::build(early_dcx, matches, &mut target_modifiers);
+        let unstable_opts = UnstableOptions::build(early_dcx, matches, &mut target_modifiers);
+
+        let remap_path_prefix = match parse_remap_path_prefix(matches) {
+            Ok(prefix_mappings) => prefix_mappings,
+            Err(err) => {
+                early_dcx.early_fatal(err);
+            }
+        };
+
+        let dcx = new_dcx(error_format, None, diagnostic_width, &unstable_opts);
+        let dcx = dcx.handle();
+
+        // check for deprecated options
+        check_deprecated_options(matches, dcx);
 
         if matches.opt_strs("passes") == ["list"] {
             println!("Available passes for running rustdoc:");
@@ -221,72 +426,100 @@ impl Options {
                 println!("{:>20} - {}", pass.name, pass.description);
             }
             println!("\nDefault passes for rustdoc:");
-            for &name in passes::DEFAULT_PASSES {
-                println!("{:>20}", name);
-            }
-            println!("\nPasses run with `--document-private-items`:");
-            for &name in passes::DEFAULT_PRIVATE_PASSES {
-                println!("{:>20}", name);
+            for p in passes::DEFAULT_PASSES {
+                print!("{:>20}", p.pass.name);
+                println_condition(p.condition);
             }
 
-            if nightly_options::is_nightly_build() {
+            if nightly_options::match_is_nightly_build(matches) {
                 println!("\nPasses run with `--show-coverage`:");
-                for &name in passes::DEFAULT_COVERAGE_PASSES {
-                    println!("{:>20}", name);
-                }
-                println!("\nPasses run with `--show-coverage --document-private-items`:");
-                for &name in passes::PRIVATE_COVERAGE_PASSES {
-                    println!("{:>20}", name);
+                for p in passes::COVERAGE_PASSES {
+                    print!("{:>20}", p.pass.name);
+                    println_condition(p.condition);
                 }
             }
 
-            return Err(0);
+            fn println_condition(condition: Condition) {
+                use Condition::*;
+                match condition {
+                    Always => println!(),
+                    WhenDocumentPrivate => println!("  (when --document-private-items)"),
+                    WhenNotDocumentPrivate => println!("  (when not --document-private-items)"),
+                    WhenNotDocumentHidden => println!("  (when not --document-hidden-items)"),
+                }
+            }
+
+            return None;
         }
 
-        let color = match matches.opt_str("color").as_ref().map(|s| &s[..]) {
-            Some("auto") => ColorConfig::Auto,
-            Some("always") => ColorConfig::Always,
-            Some("never") => ColorConfig::Never,
-            None => ColorConfig::Auto,
-            Some(arg) => {
-                early_error(ErrorOutputType::default(),
-                            &format!("argument for --color must be `auto`, `always` or `never` \
-                                      (instead was `{}`)", arg));
+        let mut emit = Vec::new();
+        for list in matches.opt_strs("emit") {
+            for kind in list.split(',') {
+                match kind.parse() {
+                    Ok(kind) => emit.push(kind),
+                    Err(()) => dcx.fatal(format!("unrecognized emission type: {kind}")),
+                }
             }
-        };
-        let error_format = match matches.opt_str("error-format").as_ref().map(|s| &s[..]) {
-            Some("human") => ErrorOutputType::HumanReadable(color),
-            Some("json") => ErrorOutputType::Json(false),
-            Some("pretty-json") => ErrorOutputType::Json(true),
-            Some("short") => ErrorOutputType::Short(color),
-            None => ErrorOutputType::HumanReadable(color),
-            Some(arg) => {
-                early_error(ErrorOutputType::default(),
-                            &format!("argument for --error-format must be `human`, `json` or \
-                                      `short` (instead was `{}`)", arg));
-            }
+        }
+
+        let show_coverage = matches.opt_present("show-coverage");
+        let output_format_s = matches.opt_str("output-format");
+        let output_format = match output_format_s {
+            Some(ref s) => match OutputFormat::try_from(s.as_str()) {
+                Ok(out_fmt) => out_fmt,
+                Err(e) => dcx.fatal(e),
+            },
+            None => OutputFormat::default(),
         };
 
-        let codegen_options = build_codegen_options(matches, error_format);
-        let debugging_options = build_debugging_options(matches, error_format);
+        // check for `--output-format=json`
+        match (
+            output_format_s.as_ref().map(|_| output_format),
+            show_coverage,
+            nightly_options::is_unstable_enabled(matches),
+        ) {
+            (None | Some(OutputFormat::Json), true, _) => {}
+            (_, true, _) => {
+                dcx.fatal(format!(
+                    "`--output-format={}` is not supported for the `--show-coverage` option",
+                    output_format_s.unwrap_or_default(),
+                ));
+            }
+            // If `-Zunstable-options` is used, nothing to check after this point.
+            (_, false, true) => {}
+            (None | Some(OutputFormat::Html), false, _) => {}
+            (Some(OutputFormat::Json), false, false) => {
+                dcx.fatal(
+                    "the -Z unstable-options flag must be passed to enable --output-format for documentation generation (see https://github.com/rust-lang/rust/issues/76578)",
+                );
+            }
+            (Some(OutputFormat::Doctest), false, false) => {
+                dcx.fatal(
+                    "the -Z unstable-options flag must be passed to enable --output-format for documentation generation (see https://github.com/rust-lang/rust/issues/134529)",
+                );
+            }
+        }
 
-        let diag = new_handler(error_format,
-                               None,
-                               debugging_options.treat_err_as_bug,
-                               debugging_options.ui_testing);
-
-        // check for deprecated options
-        check_deprecated_options(&matches, &diag);
-
-        let to_check = matches.opt_strs("theme-checker");
+        let to_check = matches.opt_strs("check-theme");
         if !to_check.is_empty() {
-            let paths = theme::load_css_paths(static_files::themes::LIGHT.as_bytes());
+            let mut content =
+                std::str::from_utf8(static_files::STATIC_FILES.rustdoc_css.src_bytes).unwrap();
+            if let Some((_, inside)) = content.split_once("/* Begin theme: light */") {
+                content = inside;
+            }
+            if let Some((inside, _)) = content.split_once("/* End theme: light */") {
+                content = inside;
+            }
+            let paths = match theme::load_css_paths(content) {
+                Ok(p) => p,
+                Err(e) => dcx.fatal(e),
+            };
             let mut errors = 0;
 
-            println!("rustdoc: [theme-checker] Starting tests!");
+            println!("rustdoc: [check-theme] Starting tests! (Ignoring all other arguments)");
             for theme_file in to_check.iter() {
-                print!(" - Checking \"{}\"...", theme_file);
-                let (success, differences) = theme::test_theme_against(theme_file, &paths, &diag);
+                print!(" - Checking \"{theme_file}\"...");
+                let (success, differences) = theme::test_theme_against(theme_file, &paths, dcx);
                 if !differences.is_empty() || !success {
                     println!(" FAILED");
                     errors += 1;
@@ -298,260 +531,418 @@ impl Options {
                 }
             }
             if errors != 0 {
-                return Err(1);
+                dcx.fatal("[check-theme] one or more tests failed");
             }
-            return Err(0);
+            return None;
         }
 
-        if matches.free.is_empty() {
-            diag.struct_err("missing file operand").emit();
-            return Err(1);
-        }
-        if matches.free.len() > 1 {
-            diag.struct_err("too many file operands").emit();
-            return Err(1);
-        }
-        let input = PathBuf::from(&matches.free[0]);
+        let (lint_opts, describe_lints, lint_cap) = get_cmd_lint_options(early_dcx, matches);
 
-        let libs = matches.opt_strs("L").iter()
-            .map(|s| SearchPath::from_cli_opt(s, error_format))
+        let input = if describe_lints {
+            InputMode::HasFile(make_input(early_dcx, ""))
+        } else {
+            match matches.free.as_slice() {
+                [] if matches.opt_str("merge").as_deref() == Some("finalize") => {
+                    InputMode::NoInputMergeFinalize
+                }
+                [] => dcx.fatal("missing file operand"),
+                [input] => InputMode::HasFile(make_input(early_dcx, input)),
+                _ => dcx.fatal("too many file operands"),
+            }
+        };
+
+        let externs = parse_externs(early_dcx, matches, &unstable_opts);
+        let extern_html_root_urls = match parse_extern_html_roots(matches) {
+            Ok(ex) => ex,
+            Err(err) => dcx.fatal(err),
+        };
+
+        let parts_out_dir =
+            match matches.opt_str("parts-out-dir").map(PathToParts::from_flag).transpose() {
+                Ok(parts_out_dir) => parts_out_dir,
+                Err(e) => dcx.fatal(e),
+            };
+        let include_parts_dir = match parse_include_parts_dir(matches) {
+            Ok(include_parts_dir) => include_parts_dir,
+            Err(e) => dcx.fatal(e),
+        };
+
+        let default_settings: Vec<Vec<(String, String)>> = vec![
+            matches
+                .opt_str("default-theme")
+                .iter()
+                .flat_map(|theme| {
+                    vec![
+                        ("use-system-theme".to_string(), "false".to_string()),
+                        ("theme".to_string(), theme.to_string()),
+                    ]
+                })
+                .collect(),
+            matches
+                .opt_strs("default-setting")
+                .iter()
+                .map(|s| match s.split_once('=') {
+                    None => (s.clone(), "true".to_string()),
+                    Some((k, v)) => (k.to_string(), v.to_string()),
+                })
+                .collect(),
+        ];
+        let default_settings = default_settings
+            .into_iter()
+            .flatten()
+            .map(
+                // The keys here become part of `data-` attribute names in the generated HTML.  The
+                // browser does a strange mapping when converting them into attributes on the
+                // `dataset` property on the DOM HTML Node:
+                //   https://developer.mozilla.org/en-US/docs/Web/API/HTMLElement/dataset
+                //
+                // The original key values we have are the same as the DOM storage API keys and the
+                // command line options, so contain `-`.  Our JavaScript needs to be able to look
+                // these values up both in `dataset` and in the storage API, so it needs to be able
+                // to convert the names back and forth.  Despite doing this kebab-case to
+                // StudlyCaps transformation automatically, the JS DOM API does not provide a
+                // mechanism for doing just the transformation on a string.  So we want to avoid
+                // the StudlyCaps representation in the `dataset` property.
+                //
+                // We solve this by replacing all the `-`s with `_`s.  We do that here, when we
+                // generate the `data-` attributes, and in the JS, when we look them up.  (See
+                // `getSettingValue` in `storage.js.`) Converting `-` to `_` is simple in JS.
+                //
+                // The values will be HTML-escaped by the default Tera escaping.
+                |(k, v)| (k.replace('-', "_"), v),
+            )
             .collect();
-        let externs = match parse_externs(&matches) {
-            Ok(ex) => ex,
-            Err(err) => {
-                diag.struct_err(&err).emit();
-                return Err(1);
-            }
-        };
-        let extern_html_root_urls = match parse_extern_html_roots(&matches) {
-            Ok(ex) => ex,
-            Err(err) => {
-                diag.struct_err(err).emit();
-                return Err(1);
-            }
-        };
 
         let test_args = matches.opt_strs("test-args");
-        let test_args: Vec<String> = test_args.iter()
-                                              .flat_map(|s| s.split_whitespace())
-                                              .map(|s| s.to_string())
-                                              .collect();
+        let test_args: Vec<String> =
+            test_args.iter().flat_map(|s| s.split_whitespace()).map(|s| s.to_string()).collect();
 
         let should_test = matches.opt_present("test");
+        let no_run = matches.opt_present("no-run");
 
-        let output = matches.opt_str("o")
-                            .map(|s| PathBuf::from(&s))
-                            .unwrap_or_else(|| PathBuf::from("doc"));
-        let mut cfgs = matches.opt_strs("cfg");
-        cfgs.push("rustdoc".to_string());
+        if !should_test && no_run {
+            dcx.fatal("the `--test` flag must be passed to enable `--no-run`");
+        }
+
+        let mut output_to_stdout = false;
+        let test_builder_wrappers =
+            matches.opt_strs("test-builder-wrapper").iter().map(PathBuf::from).collect();
+        let output = match (matches.opt_str("out-dir"), matches.opt_str("output")) {
+            (Some(_), Some(_)) => {
+                dcx.fatal("cannot use both 'out-dir' and 'output' at once");
+            }
+            (Some(out_dir), None) | (None, Some(out_dir)) => {
+                output_to_stdout = out_dir == "-";
+                PathBuf::from(out_dir)
+            }
+            (None, None) => PathBuf::from("doc"),
+        };
+
+        let cfgs = matches.opt_strs("cfg");
+        let check_cfgs = matches.opt_strs("check-cfg");
 
         let extension_css = matches.opt_str("e").map(|s| PathBuf::from(&s));
 
-        if let Some(ref p) = extension_css {
-            if !p.is_file() {
-                diag.struct_err("option --extend-css argument must be a file").emit();
-                return Err(1);
-            }
+        if let Some(ref p) = extension_css
+            && !p.is_file()
+        {
+            dcx.fatal("option --extend-css argument must be a file");
         }
 
         let mut themes = Vec::new();
-        if matches.opt_present("themes") {
-            let paths = theme::load_css_paths(static_files::themes::LIGHT.as_bytes());
+        if matches.opt_present("theme") {
+            let mut content =
+                std::str::from_utf8(static_files::STATIC_FILES.rustdoc_css.src_bytes).unwrap();
+            if let Some((_, inside)) = content.split_once("/* Begin theme: light */") {
+                content = inside;
+            }
+            if let Some((inside, _)) = content.split_once("/* End theme: light */") {
+                content = inside;
+            }
+            let paths = match theme::load_css_paths(content) {
+                Ok(p) => p,
+                Err(e) => dcx.fatal(e),
+            };
 
-            for (theme_file, theme_s) in matches.opt_strs("themes")
-                                                .iter()
-                                                .map(|s| (PathBuf::from(&s), s.to_owned())) {
+            for (theme_file, theme_s) in
+                matches.opt_strs("theme").iter().map(|s| (PathBuf::from(&s), s.to_owned()))
+            {
                 if !theme_file.is_file() {
-                    diag.struct_err("option --themes arguments must all be files").emit();
-                    return Err(1);
-                }
-                let (success, ret) = theme::test_theme_against(&theme_file, &paths, &diag);
-                if !success || !ret.is_empty() {
-                    diag.struct_err(&format!("invalid theme: \"{}\"", theme_s))
-                        .help("check what's wrong with the --theme-checker option")
+                    dcx.struct_fatal(format!("invalid argument: \"{theme_s}\""))
+                        .with_help("arguments to --theme must be files")
                         .emit();
-                    return Err(1);
                 }
-                themes.push(theme_file);
+                if theme_file.extension() != Some(OsStr::new("css")) {
+                    dcx.struct_fatal(format!("invalid argument: \"{theme_s}\""))
+                        .with_help("arguments to --theme must have a .css extension")
+                        .emit();
+                }
+                let (success, ret) = theme::test_theme_against(&theme_file, &paths, dcx);
+                if !success {
+                    dcx.fatal(format!("error loading theme file: \"{theme_s}\""));
+                } else if !ret.is_empty() {
+                    dcx.struct_warn(format!(
+                        "theme file \"{theme_s}\" is missing CSS rules from the default theme",
+                    ))
+                    .with_warn("the theme may appear incorrect when loaded")
+                    .with_help(format!(
+                        "to see what rules are missing, call `rustdoc --check-theme \"{theme_s}\"`",
+                    ))
+                    .emit();
+                }
+                themes.push(StylePath { path: theme_file });
             }
         }
+
+        let edition = config::parse_crate_edition(early_dcx, matches);
 
         let mut id_map = html::markdown::IdMap::new();
-        id_map.populate(html::render::initial_ids());
-        let external_html = match ExternalHtml::load(
-                &matches.opt_strs("html-in-header"),
-                &matches.opt_strs("html-before-content"),
-                &matches.opt_strs("html-after-content"),
-                &matches.opt_strs("markdown-before-content"),
-                &matches.opt_strs("markdown-after-content"), &diag, &mut id_map) {
-            Some(eh) => eh,
-            None => return Err(3),
+        let Some(external_html) = ExternalHtml::load(
+            &matches.opt_strs("html-in-header"),
+            &matches.opt_strs("html-before-content"),
+            &matches.opt_strs("html-after-content"),
+            &matches.opt_strs("markdown-before-content"),
+            &matches.opt_strs("markdown-after-content"),
+            nightly_options::match_is_nightly_build(matches),
+            dcx,
+            &mut id_map,
+            edition,
+            &None,
+        ) else {
+            dcx.fatal("`ExternalHtml::load` failed");
         };
 
-        let edition = matches.opt_str("edition").unwrap_or("2015".to_string());
-        let edition = match edition.parse() {
-            Ok(e) => e,
-            Err(_) => {
-                diag.struct_err("could not parse edition").emit();
-                return Err(1);
-            }
-        };
-
-        match matches.opt_str("r").as_ref().map(|s| &**s) {
+        match matches.opt_str("r").as_deref() {
             Some("rust") | None => {}
-            Some(s) => {
-                diag.struct_err(&format!("unknown input format: {}", s)).emit();
-                return Err(1);
-            }
-        }
-
-        match matches.opt_str("w").as_ref().map(|s| &**s) {
-            Some("html") | None => {}
-            Some(s) => {
-                diag.struct_err(&format!("unknown output format: {}", s)).emit();
-                return Err(1);
-            }
+            Some(s) => dcx.fatal(format!("unknown input format: {s}")),
         }
 
         let index_page = matches.opt_str("index-page").map(|s| PathBuf::from(&s));
-        if let Some(ref index_page) = index_page {
-            if !index_page.is_file() {
-                diag.struct_err("option `--index-page` argument must be a file").emit();
-                return Err(1);
-            }
+        if let Some(ref index_page) = index_page
+            && !index_page.is_file()
+        {
+            dcx.fatal("option `--index-page` argument must be a file");
         }
 
-        let target = matches.opt_str("target").map(|target| {
-            if target.ends_with(".json") {
-                TargetTriple::TargetPath(PathBuf::from(target))
-            } else {
-                TargetTriple::TargetTriple(target)
+        let target = parse_target_triple(early_dcx, matches);
+        let maybe_sysroot = matches.opt_str("sysroot").map(PathBuf::from);
+
+        let sysroot = rustc_session::filesearch::materialize_sysroot(maybe_sysroot.clone());
+
+        let libs = matches
+            .opt_strs("L")
+            .iter()
+            .map(|s| {
+                SearchPath::from_cli_opt(
+                    &sysroot,
+                    &target,
+                    early_dcx,
+                    s,
+                    #[allow(rustc::bad_opt_access)] // we have no `Session` here
+                    unstable_opts.unstable_options,
+                )
+            })
+            .collect();
+
+        let crate_types = match parse_crate_types_from_list(matches.opt_strs("crate-type")) {
+            Ok(types) => types,
+            Err(e) => {
+                dcx.fatal(format!("unknown crate type: {e}"));
             }
-        });
-
-        let show_coverage = matches.opt_present("show-coverage");
-        let document_private = matches.opt_present("document-private-items");
-
-        let default_passes = if matches.opt_present("no-defaults") {
-            passes::DefaultPassOption::None
-        } else if show_coverage && document_private {
-            passes::DefaultPassOption::PrivateCoverage
-        } else if show_coverage {
-            passes::DefaultPassOption::Coverage
-        } else if document_private {
-            passes::DefaultPassOption::Private
-        } else {
-            passes::DefaultPassOption::Default
         };
-        let manual_passes = matches.opt_strs("passes");
 
         let crate_name = matches.opt_str("crate-name");
+        let bin_crate = crate_types.contains(&CrateType::Executable);
+        let proc_macro_crate = crate_types.contains(&CrateType::ProcMacro);
         let playground_url = matches.opt_str("playground-url");
-        let maybe_sysroot = matches.opt_str("sysroot").map(PathBuf::from);
-        let display_warnings = matches.opt_present("display-warnings");
-        let linker = matches.opt_str("linker").map(PathBuf::from);
-        let sort_modules_alphabetically = !matches.opt_present("sort-modules-by-appearance");
+        let module_sorting = if matches.opt_present("sort-modules-by-appearance") {
+            ModuleSorting::DeclarationOrder
+        } else {
+            ModuleSorting::Alphabetical
+        };
         let resource_suffix = matches.opt_str("resource-suffix").unwrap_or_default();
-        let enable_minification = !matches.opt_present("disable-minification");
         let markdown_no_toc = matches.opt_present("markdown-no-toc");
         let markdown_css = matches.opt_strs("markdown-css");
         let markdown_playground_url = matches.opt_str("markdown-playground-url");
         let crate_version = matches.opt_str("crate-version");
         let enable_index_page = matches.opt_present("enable-index-page") || index_page.is_some();
         let static_root_path = matches.opt_str("static-root-path");
-        let generate_search_filter = !matches.opt_present("disable-per-crate-search");
+        let test_run_directory = matches.opt_str("test-run-directory").map(PathBuf::from);
         let persist_doctests = matches.opt_str("persist-doctests").map(PathBuf::from);
-        let generate_redirect_pages = matches.opt_present("generate-redirect-pages");
+        let test_builder = matches.opt_str("test-builder").map(PathBuf::from);
+        let codegen_options_strs = matches.opt_strs("C");
+        let unstable_opts_strs = matches.opt_strs("Z");
+        let lib_strs = matches.opt_strs("L");
+        let extern_strs = matches.opt_strs("extern");
+        let test_runtool = matches.opt_str("test-runtool");
+        let test_runtool_args = matches.opt_strs("test-runtool-arg");
+        let document_private = matches.opt_present("document-private-items");
+        let document_hidden = matches.opt_present("document-hidden-items");
+        let run_check = matches.opt_present("check");
+        let generate_redirect_map = matches.opt_present("generate-redirect-map");
+        let show_type_layout = matches.opt_present("show-type-layout");
+        let nocapture = matches.opt_present("nocapture");
+        let generate_link_to_definition = matches.opt_present("generate-link-to-definition");
+        let extern_html_root_takes_precedence =
+            matches.opt_present("extern-html-root-takes-precedence");
+        let html_no_source = matches.opt_present("html-no-source");
+        let should_merge = match parse_merge(matches) {
+            Ok(result) => result,
+            Err(e) => dcx.fatal(format!("--merge option error: {e}")),
+        };
 
-        let (lint_opts, describe_lints, lint_cap) = get_cmd_lint_options(matches, error_format);
+        if generate_link_to_definition && (show_coverage || output_format != OutputFormat::Html) {
+            dcx.struct_warn(
+                "`--generate-link-to-definition` option can only be used with HTML output format",
+            )
+            .with_note("`--generate-link-to-definition` option will be ignored")
+            .emit();
+        }
 
-        Ok(Options {
-            input,
-            crate_name,
+        let scrape_examples_options = ScrapeExamplesOptions::new(matches, dcx);
+        let with_examples = matches.opt_strs("with-examples");
+        let call_locations = crate::scrape_examples::load_call_locations(with_examples, dcx);
+        let doctest_build_args = matches.opt_strs("doctest-build-arg");
+
+        let unstable_features =
+            rustc_feature::UnstableFeatures::from_environment(crate_name.as_deref());
+
+        let disable_minification = matches.opt_present("disable-minification");
+
+        let options = Options {
+            bin_crate,
+            proc_macro_crate,
             error_format,
+            diagnostic_width,
             libs,
+            lib_strs,
             externs,
+            extern_strs,
             cfgs,
+            check_cfgs,
             codegen_options,
-            debugging_options,
+            codegen_options_strs,
+            unstable_opts,
+            unstable_opts_strs,
             target,
             edition,
+            sysroot,
             maybe_sysroot,
-            linker,
             lint_opts,
             describe_lints,
             lint_cap,
             should_test,
             test_args,
-            default_passes,
-            manual_passes,
-            display_warnings,
             show_coverage,
             crate_version,
+            test_run_directory,
             persist_doctests,
-            render_options: RenderOptions {
-                output,
-                external_html,
-                id_map,
-                playground_url,
-                sort_modules_alphabetically,
-                themes,
-                extension_css,
-                extern_html_root_urls,
-                resource_suffix,
-                enable_minification,
-                enable_index_page,
-                index_page,
-                static_root_path,
-                markdown_no_toc,
-                markdown_css,
-                markdown_playground_url,
-                generate_search_filter,
-                generate_redirect_pages,
-            }
-        })
-    }
-
-    /// Returns `true` if the file given as `self.input` is a Markdown file.
-    pub fn markdown_input(&self) -> bool {
-        self.input.extension()
-            .map_or(false, |e| e == "md" || e == "markdown")
+            test_runtool,
+            test_runtool_args,
+            test_builder,
+            run_check,
+            no_run,
+            test_builder_wrappers,
+            remap_path_prefix,
+            nocapture,
+            crate_name,
+            output_format,
+            json_unused_externs,
+            scrape_examples_options,
+            unstable_features,
+            expanded_args: args,
+            doctest_build_args,
+        };
+        let render_options = RenderOptions {
+            output,
+            external_html,
+            id_map,
+            playground_url,
+            module_sorting,
+            themes,
+            extension_css,
+            extern_html_root_urls,
+            extern_html_root_takes_precedence,
+            default_settings,
+            resource_suffix,
+            enable_index_page,
+            index_page,
+            static_root_path,
+            markdown_no_toc,
+            markdown_css,
+            markdown_playground_url,
+            document_private,
+            document_hidden,
+            generate_redirect_map,
+            show_type_layout,
+            unstable_features,
+            emit,
+            generate_link_to_definition,
+            call_locations,
+            no_emit_shared: false,
+            html_no_source,
+            output_to_stdout,
+            should_merge,
+            include_parts_dir,
+            parts_out_dir,
+            disable_minification,
+        };
+        Some((input, options, render_options))
     }
 }
 
+/// Returns `true` if the file given as `self.input` is a Markdown file.
+pub(crate) fn markdown_input(input: &Input) -> Option<&Path> {
+    input.opt_path().filter(|p| matches!(p.extension(), Some(e) if e == "md" || e == "markdown"))
+}
+
+fn parse_remap_path_prefix(
+    matches: &getopts::Matches,
+) -> Result<Vec<(PathBuf, PathBuf)>, &'static str> {
+    matches
+        .opt_strs("remap-path-prefix")
+        .into_iter()
+        .map(|remap| {
+            remap
+                .rsplit_once('=')
+                .ok_or("--remap-path-prefix must contain '=' between FROM and TO")
+                .map(|(from, to)| (PathBuf::from(from), PathBuf::from(to)))
+        })
+        .collect()
+}
+
 /// Prints deprecation warnings for deprecated options
-fn check_deprecated_options(matches: &getopts::Matches, diag: &errors::Handler) {
-    let deprecated_flags = [
-       "input-format",
-       "output-format",
-       "no-defaults",
-       "passes",
-    ];
+fn check_deprecated_options(matches: &getopts::Matches, dcx: DiagCtxtHandle<'_>) {
+    let deprecated_flags = [];
 
-    for flag in deprecated_flags.into_iter() {
+    for &flag in deprecated_flags.iter() {
         if matches.opt_present(flag) {
-            let mut err = diag.struct_warn(&format!("the '{}' flag is considered deprecated",
-                                                    flag));
-            err.warn("please see https://github.com/rust-lang/rust/issues/44136");
-
-            if *flag == "no-defaults" {
-                err.help("you may want to use --document-private-items");
-            }
-
-            err.emit();
+            dcx.struct_warn(format!("the `{flag}` flag is deprecated"))
+                .with_note(
+                    "see issue #44136 <https://github.com/rust-lang/rust/issues/44136> \
+                    for more information",
+                )
+                .emit();
         }
     }
 
-    let removed_flags = [
-        "plugins",
-        "plugin-path",
-    ];
+    let removed_flags = ["plugins", "plugin-path", "no-defaults", "passes", "input-format"];
 
     for &flag in removed_flags.iter() {
         if matches.opt_present(flag) {
-            diag.struct_warn(&format!("the '{}' flag no longer functions", flag))
-                .warn("see CVE-2018-1000622")
-                .emit();
+            let mut err = dcx.struct_warn(format!("the `{flag}` flag no longer functions"));
+            err.note(
+                "see issue #44136 <https://github.com/rust-lang/rust/issues/44136> \
+                for more information",
+            );
+
+            if flag == "no-defaults" || flag == "passes" {
+                err.help("you may want to use --document-private-items");
+            } else if flag == "plugins" || flag == "plugin-path" {
+                err.warn("see CVE-2018-1000622");
+            }
+
+            err.emit();
         }
     }
 }
@@ -564,31 +955,77 @@ fn parse_extern_html_roots(
 ) -> Result<BTreeMap<String, String>, &'static str> {
     let mut externs = BTreeMap::new();
     for arg in &matches.opt_strs("extern-html-root-url") {
-        let mut parts = arg.splitn(2, '=');
-        let name = parts.next().ok_or("--extern-html-root-url must not be empty")?;
-        let url = parts.next().ok_or("--extern-html-root-url must be of the form name=url")?;
+        let (name, url) =
+            arg.split_once('=').ok_or("--extern-html-root-url must be of the form name=url")?;
         externs.insert(name.to_string(), url.to_string());
     }
-
     Ok(externs)
 }
 
-/// Extracts `--extern CRATE=PATH` arguments from `matches` and
-/// returns a map mapping crate names to their paths or else an
-/// error message.
-// FIXME(eddyb) This shouldn't be duplicated with `rustc::session`.
-fn parse_externs(matches: &getopts::Matches) -> Result<Externs, String> {
-    let mut externs: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
-    for arg in &matches.opt_strs("extern") {
-        let mut parts = arg.splitn(2, '=');
-        let name = parts.next().ok_or("--extern value must not be empty".to_string())?;
-        let location = parts.next().map(|s| s.to_string());
-        if location.is_none() && !nightly_options::is_unstable_enabled(matches) {
-            return Err("the `-Z unstable-options` flag must also be passed to \
-                        enable `--extern crate_name` without `=path`".to_string());
+/// Path directly to crate-info file.
+///
+/// For example, `/home/user/project/target/doc.parts/<crate>/crate-info`.
+#[derive(Clone, Debug)]
+pub(crate) struct PathToParts(pub(crate) PathBuf);
+
+impl PathToParts {
+    fn from_flag(path: String) -> Result<PathToParts, String> {
+        let mut path = PathBuf::from(path);
+        // check here is for diagnostics
+        if path.exists() && !path.is_dir() {
+            Err(format!(
+                "--parts-out-dir and --include-parts-dir expect directories, found: {}",
+                path.display(),
+            ))
+        } else {
+            // if it doesn't exist, we'll create it. worry about that in write_shared
+            path.push("crate-info");
+            Ok(PathToParts(path))
         }
-        let name = name.to_string();
-        externs.entry(name).or_default().insert(location);
     }
-    Ok(Externs::new(externs))
+}
+
+/// Reports error if --include-parts-dir / crate-info is not a file
+fn parse_include_parts_dir(m: &getopts::Matches) -> Result<Vec<PathToParts>, String> {
+    let mut ret = Vec::new();
+    for p in m.opt_strs("include-parts-dir") {
+        let p = PathToParts::from_flag(p)?;
+        // this is just for diagnostic
+        if !p.0.is_file() {
+            return Err(format!("--include-parts-dir expected {} to be a file", p.0.display()));
+        }
+        ret.push(p);
+    }
+    Ok(ret)
+}
+
+/// Controls merging of cross-crate information
+#[derive(Debug, Clone)]
+pub(crate) struct ShouldMerge {
+    /// Should we append to existing cci in the doc root
+    pub(crate) read_rendered_cci: bool,
+    /// Should we write cci to the doc root
+    pub(crate) write_rendered_cci: bool,
+}
+
+/// Extracts read_rendered_cci and write_rendered_cci from command line arguments, or
+/// reports an error if an invalid option was provided
+fn parse_merge(m: &getopts::Matches) -> Result<ShouldMerge, &'static str> {
+    match m.opt_str("merge").as_deref() {
+        // default = read-write
+        None => Ok(ShouldMerge { read_rendered_cci: true, write_rendered_cci: true }),
+        Some("none") if m.opt_present("include-parts-dir") => {
+            Err("--include-parts-dir not allowed if --merge=none")
+        }
+        Some("none") => Ok(ShouldMerge { read_rendered_cci: false, write_rendered_cci: false }),
+        Some("shared") if m.opt_present("parts-out-dir") || m.opt_present("include-parts-dir") => {
+            Err("--parts-out-dir and --include-parts-dir not allowed if --merge=shared")
+        }
+        Some("shared") => Ok(ShouldMerge { read_rendered_cci: true, write_rendered_cci: true }),
+        Some("finalize") if m.opt_present("parts-out-dir") => {
+            Err("--parts-out-dir not allowed if --merge=finalize")
+        }
+        Some("finalize") => Ok(ShouldMerge { read_rendered_cci: false, write_rendered_cci: true }),
+        Some(_) => Err("argument to --merge must be `none`, `shared`, or `finalize`"),
+    }
 }

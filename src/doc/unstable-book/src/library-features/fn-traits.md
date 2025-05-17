@@ -2,7 +2,7 @@
 
 The tracking issue for this feature is [#29625]
 
-See Also: [`unboxed_closures`](language-features/unboxed-closures.html)
+See Also: [`unboxed_closures`](../language-features/unboxed-closures.md)
 
 [#29625]: https://github.com/rust-lang/rust/issues/29625
 
@@ -11,7 +11,7 @@ See Also: [`unboxed_closures`](language-features/unboxed-closures.html)
 The `fn_traits` feature allows for implementation of the [`Fn*`] traits
 for creating custom closure-like types.
 
-[`Fn*`]: https://doc.rust-lang.org/std/ops/trait.Fn.html
+[`Fn*`]: ../../std/ops/trait.Fn.html
 
 ```rust
 #![feature(unboxed_closures)]

@@ -1,116 +1,13 @@
-use std::ffi::OsStr;
 use std::env;
-use std::path::PathBuf;
+use std::process::Command;
+
+use camino::{Utf8Path, Utf8PathBuf};
+use tracing::*;
+
 use crate::common::Config;
 
-/// Conversion table from triple OS name to Rust SYSNAME
-const OS_TABLE: &'static [(&'static str, &'static str)] = &[
-    ("android", "android"),
-    ("androideabi", "android"),
-    ("bitrig", "bitrig"),
-    ("cloudabi", "cloudabi"),
-    ("cuda", "cuda"),
-    ("darwin", "macos"),
-    ("dragonfly", "dragonfly"),
-    ("emscripten", "emscripten"),
-    ("freebsd", "freebsd"),
-    ("fuchsia", "fuchsia"),
-    ("haiku", "haiku"),
-    ("hermit", "hermit"),
-    ("ios", "ios"),
-    ("l4re", "l4re"),
-    ("linux", "linux"),
-    ("mingw32", "windows"),
-    ("none", "none"),
-    ("netbsd", "netbsd"),
-    ("openbsd", "openbsd"),
-    ("redox", "redox"),
-    ("sgx", "sgx"),
-    ("solaris", "solaris"),
-    ("win32", "windows"),
-    ("windows", "windows"),
-];
-
-const ARCH_TABLE: &'static [(&'static str, &'static str)] = &[
-    ("aarch64", "aarch64"),
-    ("amd64", "x86_64"),
-    ("arm", "arm"),
-    ("arm64", "aarch64"),
-    ("armv4t", "arm"),
-    ("armv5te", "arm"),
-    ("armv7", "arm"),
-    ("armv7s", "arm"),
-    ("asmjs", "asmjs"),
-    ("hexagon", "hexagon"),
-    ("i386", "x86"),
-    ("i586", "x86"),
-    ("i686", "x86"),
-    ("mips", "mips"),
-    ("mips64", "mips64"),
-    ("mips64el", "mips64"),
-    ("mipsisa32r6", "mips"),
-    ("mipsisa32r6el", "mips"),
-    ("mipsisa64r6", "mips64"),
-    ("mipsisa64r6el", "mips64"),
-    ("mipsel", "mips"),
-    ("mipsisa32r6", "mips"),
-    ("mipsisa32r6el", "mips"),
-    ("mipsisa64r6", "mips64"),
-    ("mipsisa64r6el", "mips64"),
-    ("msp430", "msp430"),
-    ("nvptx64", "nvptx64"),
-    ("powerpc", "powerpc"),
-    ("powerpc64", "powerpc64"),
-    ("powerpc64le", "powerpc64"),
-    ("s390x", "s390x"),
-    ("sparc", "sparc"),
-    ("sparc64", "sparc64"),
-    ("sparcv9", "sparc64"),
-    ("thumbv6m", "thumb"),
-    ("thumbv7em", "thumb"),
-    ("thumbv7m", "thumb"),
-    ("wasm32", "wasm32"),
-    ("x86_64", "x86_64"),
-    ("xcore", "xcore"),
-];
-
-pub fn matches_os(triple: &str, name: &str) -> bool {
-    // For the wasm32 bare target we ignore anything also ignored on emscripten
-    // and then we also recognize `wasm32-bare` as the os for the target
-    if triple == "wasm32-unknown-unknown" {
-        return name == "emscripten" || name == "wasm32-bare";
-    }
-    let triple: Vec<_> = triple.split('-').collect();
-    for &(triple_os, os) in OS_TABLE {
-        if triple.contains(&triple_os) {
-            return os == name;
-        }
-    }
-    panic!("Cannot determine OS from triple");
-}
-
-/// Determine the architecture from `triple`
-pub fn get_arch(triple: &str) -> &'static str {
-    let triple: Vec<_> = triple.split('-').collect();
-    for &(triple_arch, arch) in ARCH_TABLE {
-        if triple.contains(&triple_arch) {
-            return arch;
-        }
-    }
-    panic!("Cannot determine Architecture from triple");
-}
-
-pub fn get_env(triple: &str) -> Option<&str> {
-    triple.split('-').nth(3)
-}
-
-pub fn get_pointer_width(triple: &str) -> &'static str {
-    if (triple.contains("64") && !triple.ends_with("gnux32")) || triple.starts_with("s390x") {
-        "64bit"
-    } else {
-        "32bit"
-    }
-}
+#[cfg(test)]
+mod tests;
 
 pub fn make_new_path(path: &str) -> String {
     assert!(cfg!(windows));
@@ -136,53 +33,73 @@ pub fn logv(config: &Config, s: String) {
     }
 }
 
-pub trait PathBufExt {
+pub trait Utf8PathBufExt {
     /// Append an extension to the path, even if it already has one.
-    fn with_extra_extension<S: AsRef<OsStr>>(&self, extension: S) -> PathBuf;
+    fn with_extra_extension(&self, extension: &str) -> Utf8PathBuf;
 }
 
-impl PathBufExt for PathBuf {
-    fn with_extra_extension<S: AsRef<OsStr>>(&self, extension: S) -> PathBuf {
-        if extension.as_ref().len() == 0 {
+impl Utf8PathBufExt for Utf8PathBuf {
+    fn with_extra_extension(&self, extension: &str) -> Utf8PathBuf {
+        if extension.is_empty() {
             self.clone()
         } else {
-            let mut fname = self.file_name().unwrap().to_os_string();
-            if !extension.as_ref().to_str().unwrap().starts_with(".") {
-                fname.push(".");
+            let mut fname = self.file_name().unwrap().to_string();
+            if !extension.starts_with('.') {
+                fname.push_str(".");
             }
-            fname.push(extension);
+            fname.push_str(extension);
             self.with_file_name(fname)
         }
     }
 }
 
-#[test]
-#[should_panic(expected = "Cannot determine Architecture from triple")]
-fn test_get_arch_failure() {
-    get_arch("abc");
+/// The name of the environment variable that holds dynamic library locations.
+pub fn dylib_env_var() -> &'static str {
+    if cfg!(windows) {
+        "PATH"
+    } else if cfg!(target_vendor = "apple") {
+        "DYLD_LIBRARY_PATH"
+    } else if cfg!(target_os = "haiku") {
+        "LIBRARY_PATH"
+    } else if cfg!(target_os = "aix") {
+        "LIBPATH"
+    } else {
+        "LD_LIBRARY_PATH"
+    }
 }
 
-#[test]
-fn test_get_arch() {
-    assert_eq!("x86_64", get_arch("x86_64-unknown-linux-gnu"));
-    assert_eq!("x86_64", get_arch("amd64"));
-    assert_eq!("nvptx64", get_arch("nvptx64-nvidia-cuda"));
+/// Adds a list of lookup paths to `cmd`'s dynamic library lookup path.
+/// If the dylib_path_var is already set for this cmd, the old value will be overwritten!
+pub fn add_dylib_path(
+    cmd: &mut Command,
+    paths: impl Iterator<Item = impl Into<std::path::PathBuf>>,
+) {
+    let path_env = env::var_os(dylib_env_var());
+    let old_paths = path_env.as_ref().map(env::split_paths);
+    let new_paths = paths.map(Into::into).chain(old_paths.into_iter().flatten());
+    cmd.env(dylib_env_var(), env::join_paths(new_paths).unwrap());
 }
 
-#[test]
-#[should_panic(expected = "Cannot determine OS from triple")]
-fn test_matches_os_failure() {
-    matches_os("abc", "abc");
+pub fn copy_dir_all(src: &Utf8Path, dst: &Utf8Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst.as_std_path())?;
+    for entry in std::fs::read_dir(src.as_std_path())? {
+        let entry = entry?;
+        let path = Utf8PathBuf::try_from(entry.path()).unwrap();
+        let file_name = path.file_name().unwrap();
+        let ty = entry.file_type()?;
+        if ty.is_dir() {
+            copy_dir_all(&path, &dst.join(file_name))?;
+        } else {
+            std::fs::copy(path.as_std_path(), dst.join(file_name).as_std_path())?;
+        }
+    }
+    Ok(())
 }
 
-#[test]
-fn test_matches_os() {
-    assert!(matches_os("x86_64-unknown-linux-gnu", "linux"));
-    assert!(matches_os("wasm32-unknown-unknown", "emscripten"));
-    assert!(matches_os("wasm32-unknown-unknown", "wasm32-bare"));
-    assert!(!matches_os("wasm32-unknown-unknown", "windows"));
-    assert!(matches_os("thumbv6m0-none-eabi", "none"));
-    assert!(matches_os("riscv32imc-unknown-none-elf", "none"));
-    assert!(matches_os("nvptx64-nvidia-cuda", "cuda"));
-    assert!(matches_os("x86_64-fortanix-unknown-sgx", "sgx"));
+macro_rules! static_regex {
+    ($re:literal) => {{
+        static RE: ::std::sync::OnceLock<::regex::Regex> = ::std::sync::OnceLock::new();
+        RE.get_or_init(|| ::regex::Regex::new($re).unwrap())
+    }};
 }
+pub(crate) use static_regex;

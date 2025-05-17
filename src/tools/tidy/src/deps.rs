@@ -1,403 +1,886 @@
-//! Checks the licenses of third-party dependencies by inspecting vendors.
+//! Checks the licenses of third-party dependencies.
 
-use std::collections::{BTreeSet, HashSet, HashMap};
-use std::fs;
+use std::collections::{HashMap, HashSet};
+use std::fs::{File, read_dir};
+use std::io::Write;
 use std::path::Path;
-use std::process::Command;
 
-use serde_json;
+use build_helper::ci::CiEnv;
+use cargo_metadata::semver::Version;
+use cargo_metadata::{Metadata, Package, PackageId};
 
+#[path = "../../../bootstrap/src/utils/proc_macro_deps.rs"]
+mod proc_macro_deps;
+
+/// These are licenses that are allowed for all crates, including the runtime,
+/// rustc, tools, etc.
+#[rustfmt::skip]
 const LICENSES: &[&str] = &[
-    "MIT/Apache-2.0",
-    "MIT / Apache-2.0",
-    "Apache-2.0/MIT",
+    // tidy-alphabetical-start
+    "(MIT OR Apache-2.0) AND Unicode-3.0",                 // unicode_ident (1.0.14)
+    "(MIT OR Apache-2.0) AND Unicode-DFS-2016",            // unicode_ident (1.0.12)
+    "0BSD OR MIT OR Apache-2.0",                           // adler2 license
+    "0BSD",
     "Apache-2.0 / MIT",
+    "Apache-2.0 OR ISC OR MIT",
+    "Apache-2.0 OR MIT",
+    "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT", // wasi license
+    "Apache-2.0",
+    "Apache-2.0/MIT",
+    "BSD-2-Clause OR Apache-2.0 OR MIT",                   // zerocopy
+    "ISC",
+    "MIT / Apache-2.0",
+    "MIT AND (MIT OR Apache-2.0)",
+    "MIT AND Apache-2.0 WITH LLVM-exception AND (MIT OR Apache-2.0)", // compiler-builtins
+    "MIT OR Apache-2.0 OR LGPL-2.1-or-later",              // r-efi, r-efi-alloc
+    "MIT OR Apache-2.0 OR Zlib",                           // tinyvec_macros
     "MIT OR Apache-2.0",
+    "MIT OR Zlib OR Apache-2.0",                           // miniz_oxide
     "MIT",
-    "Unlicense/MIT",
+    "MIT/Apache-2.0",
+    "Unicode-3.0",                                         // icu4x
+    "Unicode-DFS-2016",                                    // tinystr
     "Unlicense OR MIT",
+    "Unlicense/MIT",
+    "Zlib OR Apache-2.0 OR MIT",                           // tinyvec
+    // tidy-alphabetical-end
+];
+
+type ExceptionList = &'static [(&'static str, &'static str)];
+
+/// The workspaces to check for licensing and optionally permitted dependencies.
+///
+/// Each entry consists of a tuple with the following elements:
+///
+/// * The path to the workspace root Cargo.toml file.
+/// * The list of license exceptions.
+/// * Optionally a tuple of:
+///     * A list of crates for which dependencies need to be explicitly allowed.
+///     * The list of allowed dependencies.
+/// * Submodules required for the workspace.
+// FIXME auto detect all cargo workspaces
+pub(crate) const WORKSPACES: &[(&str, ExceptionList, Option<(&[&str], &[&str])>, &[&str])] = &[
+    // The root workspace has to be first for check_rustfix to work.
+    (".", EXCEPTIONS, Some((&["rustc-main"], PERMITTED_RUSTC_DEPENDENCIES)), &[]),
+    ("library", EXCEPTIONS_STDLIB, Some((&["sysroot"], PERMITTED_STDLIB_DEPENDENCIES)), &[]),
+    // Outside of the alphabetical section because rustfmt formats it using multiple lines.
+    (
+        "compiler/rustc_codegen_cranelift",
+        EXCEPTIONS_CRANELIFT,
+        Some((&["rustc_codegen_cranelift"], PERMITTED_CRANELIFT_DEPENDENCIES)),
+        &[],
+    ),
+    // tidy-alphabetical-start
+    ("compiler/rustc_codegen_gcc", EXCEPTIONS_GCC, None, &[]),
+    ("src/bootstrap", EXCEPTIONS_BOOTSTRAP, None, &[]),
+    ("src/ci/docker/host-x86_64/test-various/uefi_qemu_test", EXCEPTIONS_UEFI_QEMU_TEST, None, &[]),
+    ("src/etc/test-float-parse", EXCEPTIONS, None, &[]),
+    ("src/tools/cargo", EXCEPTIONS_CARGO, None, &["src/tools/cargo"]),
+    //("src/tools/miri/test-cargo-miri", &[], None), // FIXME uncomment once all deps are vendored
+    //("src/tools/miri/test_dependencies", &[], None), // FIXME uncomment once all deps are vendored
+    ("src/tools/rust-analyzer", EXCEPTIONS_RUST_ANALYZER, None, &[]),
+    ("src/tools/rustbook", EXCEPTIONS_RUSTBOOK, None, &["src/doc/book", "src/doc/reference"]),
+    ("src/tools/rustc-perf", EXCEPTIONS_RUSTC_PERF, None, &["src/tools/rustc-perf"]),
+    // tidy-alphabetical-end
 ];
 
 /// These are exceptions to Rust's permissive licensing policy, and
 /// should be considered bugs. Exceptions are only allowed in Rust
 /// tooling. It is _crucial_ that no exception crates be dependencies
 /// of the Rust runtime (std/test).
-const EXCEPTIONS: &[&str] = &[
-    "mdbook",             // MPL2, mdbook
-    "openssl",            // BSD+advertising clause, cargo, mdbook
-    "pest",               // MPL2, mdbook via handlebars
-    "arrayref",           // BSD-2-Clause, mdbook via handlebars via pest
-    "thread-id",          // Apache-2.0, mdbook
-    "toml-query",         // MPL-2.0, mdbook
-    "is-match",           // MPL-2.0, mdbook
-    "cssparser",          // MPL-2.0, rustdoc
-    "smallvec",           // MPL-2.0, rustdoc
-    "fuchsia-zircon-sys", // BSD-3-Clause, rustdoc, rustc, cargo
-    "fuchsia-zircon",     // BSD-3-Clause, rustdoc, rustc, cargo (jobserver & tempdir)
-    "cssparser-macros",   // MPL-2.0, rustdoc
-    "selectors",          // MPL-2.0, rustdoc
-    "clippy_lints",       // MPL-2.0, rls
-    "colored",            // MPL-2.0, rustfmt
-    "ordslice",           // Apache-2.0, rls
-    "cloudabi",           // BSD-2-Clause, (rls -> crossbeam-channel 0.2 -> rand 0.5)
-    "ryu",                // Apache-2.0, rls/cargo/... (because of serde)
-    "bytesize",           // Apache-2.0, cargo
-    "im-rc",              // MPL-2.0+, cargo
-    "adler32",            // BSD-3-Clause AND Zlib, cargo dep that isn't used
-    "fortanix-sgx-abi",   // MPL-2.0+, libstd but only for `sgx` target
-    "constant_time_eq",   // CC0-1.0, rustfmt
+#[rustfmt::skip]
+const EXCEPTIONS: ExceptionList = &[
+    // tidy-alphabetical-start
+    ("ar_archive_writer", "Apache-2.0 WITH LLVM-exception"), // rustc
+    ("arrayref", "BSD-2-Clause"),                            // rustc
+    ("blake3", "CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception"),  // rustc
+    ("colored", "MPL-2.0"),                                  // rustfmt
+    ("constant_time_eq", "CC0-1.0 OR MIT-0 OR Apache-2.0"),  // rustc
+    ("dissimilar", "Apache-2.0"),                            // rustdoc, rustc_lexer (few tests) via expect-test, (dev deps)
+    ("fluent-langneg", "Apache-2.0"),                        // rustc (fluent translations)
+    ("foldhash", "Zlib"),                                    // rustc
+    ("option-ext", "MPL-2.0"),                               // cargo-miri (via `directories`)
+    ("rustc_apfloat", "Apache-2.0 WITH LLVM-exception"),     // rustc (license is the same as LLVM uses)
+    ("ryu", "Apache-2.0 OR BSL-1.0"), // BSL is not acceptble, but we use it under Apache-2.0                       // cargo/... (because of serde)
+    ("self_cell", "Apache-2.0"),                             // rustc (fluent translations)
+    ("wasi-preview1-component-adapter-provider", "Apache-2.0 WITH LLVM-exception"), // rustc
+    // tidy-alphabetical-end
 ];
 
-/// Which crates to check against the whitelist?
-const WHITELIST_CRATES: &[CrateVersion<'_>] = &[
-    CrateVersion("rustc", "0.0.0"),
-    CrateVersion("rustc_codegen_llvm", "0.0.0"),
+/// These are exceptions to Rust's permissive licensing policy, and
+/// should be considered bugs. Exceptions are only allowed in Rust
+/// tooling. It is _crucial_ that no exception crates be dependencies
+/// of the Rust runtime (std/test).
+#[rustfmt::skip]
+const EXCEPTIONS_STDLIB: ExceptionList = &[
+    // tidy-alphabetical-start
+    ("fortanix-sgx-abi", "MPL-2.0"), // libstd but only for `sgx` target. FIXME: this dependency violates the documentation comment above.
+    // tidy-alphabetical-end
 ];
 
-/// Whitelist of crates rustc is allowed to depend on. Avoid adding to the list if possible.
-const WHITELIST: &[Crate<'_>] = &[
-    Crate("adler32"),
-    Crate("aho-corasick"),
-    Crate("arrayvec"),
-    Crate("atty"),
-    Crate("backtrace"),
-    Crate("backtrace-sys"),
-    Crate("bitflags"),
-    Crate("build_const"),
-    Crate("byteorder"),
-    Crate("cc"),
-    Crate("cfg-if"),
-    Crate("chalk-engine"),
-    Crate("chalk-macros"),
-    Crate("cloudabi"),
-    Crate("cmake"),
-    Crate("compiler_builtins"),
-    Crate("crc"),
-    Crate("crc32fast"),
-    Crate("crossbeam-deque"),
-    Crate("crossbeam-epoch"),
-    Crate("crossbeam-utils"),
-    Crate("datafrog"),
-    Crate("either"),
-    Crate("ena"),
-    Crate("env_logger"),
-    Crate("filetime"),
-    Crate("flate2"),
-    Crate("fuchsia-zircon"),
-    Crate("fuchsia-zircon-sys"),
-    Crate("getopts"),
-    Crate("humantime"),
-    Crate("itertools"),
-    Crate("jobserver"),
-    Crate("kernel32-sys"),
-    Crate("lazy_static"),
-    Crate("libc"),
-    Crate("libz-sys"),
-    Crate("lock_api"),
-    Crate("log"),
-    Crate("log_settings"),
-    Crate("memchr"),
-    Crate("memmap"),
-    Crate("memoffset"),
-    Crate("miniz-sys"),
-    Crate("miniz_oxide"),
-    Crate("miniz_oxide_c_api"),
-    Crate("nodrop"),
-    Crate("num_cpus"),
-    Crate("owning_ref"),
-    Crate("parking_lot"),
-    Crate("parking_lot_core"),
-    Crate("pkg-config"),
-    Crate("polonius-engine"),
-    Crate("proc-macro2"),
-    Crate("quick-error"),
-    Crate("quote"),
-    Crate("rand"),
-    Crate("rand_chacha"),
-    Crate("rand_core"),
-    Crate("rand_hc"),
-    Crate("rand_isaac"),
-    Crate("rand_pcg"),
-    Crate("rand_xorshift"),
-    Crate("redox_syscall"),
-    Crate("redox_termios"),
-    Crate("regex"),
-    Crate("regex-syntax"),
-    Crate("remove_dir_all"),
-    Crate("rustc-demangle"),
-    Crate("rustc-hash"),
-    Crate("rustc-rayon"),
-    Crate("rustc-rayon-core"),
-    Crate("rustc_version"),
-    Crate("scoped-tls"),
-    Crate("scopeguard"),
-    Crate("semver"),
-    Crate("semver-parser"),
-    Crate("serde"),
-    Crate("serde_derive"),
-    Crate("smallvec"),
-    Crate("stable_deref_trait"),
-    Crate("syn"),
-    Crate("synstructure"),
-    Crate("tempfile"),
-    Crate("termcolor"),
-    Crate("terminon"),
-    Crate("termion"),
-    Crate("thread_local"),
-    Crate("ucd-util"),
-    Crate("unicode-width"),
-    Crate("unicode-xid"),
-    Crate("unreachable"),
-    Crate("utf8-ranges"),
-    Crate("vcpkg"),
-    Crate("version_check"),
-    Crate("void"),
-    Crate("winapi"),
-    Crate("winapi-build"),
-    Crate("winapi-i686-pc-windows-gnu"),
-    Crate("winapi-util"),
-    Crate("winapi-x86_64-pc-windows-gnu"),
-    Crate("wincolor"),
+const EXCEPTIONS_CARGO: ExceptionList = &[
+    // tidy-alphabetical-start
+    ("arrayref", "BSD-2-Clause"),
+    ("bitmaps", "MPL-2.0+"),
+    ("blake3", "CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception"),
+    ("ciborium", "Apache-2.0"),
+    ("ciborium-io", "Apache-2.0"),
+    ("ciborium-ll", "Apache-2.0"),
+    ("constant_time_eq", "CC0-1.0 OR MIT-0 OR Apache-2.0"),
+    ("dunce", "CC0-1.0 OR MIT-0 OR Apache-2.0"),
+    ("encoding_rs", "(Apache-2.0 OR MIT) AND BSD-3-Clause"),
+    ("fiat-crypto", "MIT OR Apache-2.0 OR BSD-1-Clause"),
+    ("foldhash", "Zlib"),
+    ("im-rc", "MPL-2.0+"),
+    ("libz-rs-sys", "Zlib"),
+    ("normalize-line-endings", "Apache-2.0"),
+    ("openssl", "Apache-2.0"),
+    ("ryu", "Apache-2.0 OR BSL-1.0"), // BSL is not acceptble, but we use it under Apache-2.0
+    ("similar", "Apache-2.0"),
+    ("sized-chunks", "MPL-2.0+"),
+    ("subtle", "BSD-3-Clause"),
+    ("supports-hyperlinks", "Apache-2.0"),
+    ("unicode-bom", "Apache-2.0"),
+    ("zlib-rs", "Zlib"),
+    // tidy-alphabetical-end
 ];
 
-// Some types for Serde to deserialize the output of `cargo metadata` to.
+const EXCEPTIONS_RUST_ANALYZER: ExceptionList = &[
+    // tidy-alphabetical-start
+    ("dissimilar", "Apache-2.0"),
+    ("foldhash", "Zlib"),
+    ("notify", "CC0-1.0"),
+    ("option-ext", "MPL-2.0"),
+    ("pulldown-cmark-to-cmark", "Apache-2.0"),
+    ("rustc_apfloat", "Apache-2.0 WITH LLVM-exception"),
+    ("ryu", "Apache-2.0 OR BSL-1.0"), // BSL is not acceptble, but we use it under Apache-2.0
+    ("scip", "Apache-2.0"),
+    // tidy-alphabetical-end
+];
 
-#[derive(Deserialize)]
-struct Output {
-    resolve: Resolve,
-}
+const EXCEPTIONS_RUSTC_PERF: ExceptionList = &[
+    // tidy-alphabetical-start
+    ("alloc-no-stdlib", "BSD-3-Clause"),
+    ("alloc-stdlib", "BSD-3-Clause"),
+    ("brotli", "BSD-3-Clause/MIT"),
+    ("brotli-decompressor", "BSD-3-Clause/MIT"),
+    ("encoding_rs", "(Apache-2.0 OR MIT) AND BSD-3-Clause"),
+    ("inferno", "CDDL-1.0"),
+    ("ring", NON_STANDARD_LICENSE), // see EXCEPTIONS_NON_STANDARD_LICENSE_DEPS for more.
+    ("ryu", "Apache-2.0 OR BSL-1.0"),
+    ("snap", "BSD-3-Clause"),
+    ("subtle", "BSD-3-Clause"),
+    // tidy-alphabetical-end
+];
 
-#[derive(Deserialize)]
-struct Resolve {
-    nodes: Vec<ResolveNode>,
-}
+const EXCEPTIONS_RUSTBOOK: ExceptionList = &[
+    // tidy-alphabetical-start
+    ("cssparser", "MPL-2.0"),
+    ("cssparser-macros", "MPL-2.0"),
+    ("dtoa-short", "MPL-2.0"),
+    ("mdbook", "MPL-2.0"),
+    ("ryu", "Apache-2.0 OR BSL-1.0"),
+    // tidy-alphabetical-end
+];
 
-#[derive(Deserialize)]
-struct ResolveNode {
-    id: String,
-    dependencies: Vec<String>,
-}
+const EXCEPTIONS_CRANELIFT: ExceptionList = &[
+    // tidy-alphabetical-start
+    ("cranelift-assembler-x64", "Apache-2.0 WITH LLVM-exception"),
+    ("cranelift-assembler-x64-meta", "Apache-2.0 WITH LLVM-exception"),
+    ("cranelift-bforest", "Apache-2.0 WITH LLVM-exception"),
+    ("cranelift-bitset", "Apache-2.0 WITH LLVM-exception"),
+    ("cranelift-codegen", "Apache-2.0 WITH LLVM-exception"),
+    ("cranelift-codegen-meta", "Apache-2.0 WITH LLVM-exception"),
+    ("cranelift-codegen-shared", "Apache-2.0 WITH LLVM-exception"),
+    ("cranelift-control", "Apache-2.0 WITH LLVM-exception"),
+    ("cranelift-entity", "Apache-2.0 WITH LLVM-exception"),
+    ("cranelift-frontend", "Apache-2.0 WITH LLVM-exception"),
+    ("cranelift-isle", "Apache-2.0 WITH LLVM-exception"),
+    ("cranelift-jit", "Apache-2.0 WITH LLVM-exception"),
+    ("cranelift-module", "Apache-2.0 WITH LLVM-exception"),
+    ("cranelift-native", "Apache-2.0 WITH LLVM-exception"),
+    ("cranelift-object", "Apache-2.0 WITH LLVM-exception"),
+    ("foldhash", "Zlib"),
+    ("mach2", "BSD-2-Clause OR MIT OR Apache-2.0"),
+    ("regalloc2", "Apache-2.0 WITH LLVM-exception"),
+    ("target-lexicon", "Apache-2.0 WITH LLVM-exception"),
+    ("wasmtime-jit-icache-coherence", "Apache-2.0 WITH LLVM-exception"),
+    // tidy-alphabetical-end
+];
 
-/// A unique identifier for a crate.
-#[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Debug, Hash)]
-struct Crate<'a>(&'a str); // (name)
+const EXCEPTIONS_GCC: ExceptionList = &[
+    // tidy-alphabetical-start
+    ("gccjit", "GPL-3.0"),
+    ("gccjit_sys", "GPL-3.0"),
+    // tidy-alphabetical-end
+];
 
-#[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Debug, Hash)]
-struct CrateVersion<'a>(&'a str, &'a str); // (name, version)
+const EXCEPTIONS_BOOTSTRAP: ExceptionList = &[
+    ("ryu", "Apache-2.0 OR BSL-1.0"), // through serde. BSL is not acceptble, but we use it under Apache-2.0
+];
 
-impl Crate<'_> {
-    pub fn id_str(&self) -> String {
-        format!("{} ", self.0)
-    }
-}
+const EXCEPTIONS_UEFI_QEMU_TEST: ExceptionList = &[
+    ("r-efi", "MIT OR Apache-2.0 OR LGPL-2.1-or-later"), // LGPL is not acceptable, but we use it under MIT OR Apache-2.0
+];
 
-impl<'a> CrateVersion<'a> {
-    /// Returns the struct and whether or not the dependency is in-tree.
-    pub fn from_str(s: &'a str) -> (Self, bool) {
-        let mut parts = s.split(' ');
-        let name = parts.next().unwrap();
-        let version = parts.next().unwrap();
-        let path = parts.next().unwrap();
+/// Placeholder for non-standard license file.
+const NON_STANDARD_LICENSE: &str = "NON_STANDARD_LICENSE";
 
-        let is_path_dep = path.starts_with("(path+");
+/// These dependencies have non-standard licenses but are genenrally permitted.
+const EXCEPTIONS_NON_STANDARD_LICENSE_DEPS: &[&str] = &[
+    // `ring` is included because it is an optional dependency of `hyper`,
+    // which is a training data in rustc-perf for optimized build.
+    // The license of it is generally `ISC AND MIT AND OpenSSL`,
+    // though the `package.license` field is not set.
+    //
+    // See https://github.com/briansmith/ring/issues/902
+    "ring",
+];
 
-        (CrateVersion(name, version), is_path_dep)
-    }
+const PERMITTED_DEPS_LOCATION: &str = concat!(file!(), ":", line!());
 
-    pub fn id_str(&self) -> String {
-        format!("{} {}", self.0, self.1)
-    }
-}
-
-impl<'a> From<CrateVersion<'a>> for Crate<'a> {
-    fn from(cv: CrateVersion<'a>) -> Crate<'a> {
-        Crate(cv.0)
-    }
-}
-
-/// Checks the dependency at the given path. Changes `bad` to `true` if a check failed.
+/// Crates rustc is allowed to depend on. Avoid adding to the list if possible.
 ///
-/// Specifically, this checks that the license is correct.
-pub fn check(path: &Path, bad: &mut bool) {
-    // Check licences.
-    let path = path.join("../vendor");
-    assert!(path.exists(), "vendor directory missing");
-    let mut saw_dir = false;
-    for dir in t!(path.read_dir()) {
-        saw_dir = true;
-        let dir = t!(dir);
+/// This list is here to provide a speed-bump to adding a new dependency to
+/// rustc. Please check with the compiler team before adding an entry.
+const PERMITTED_RUSTC_DEPENDENCIES: &[&str] = &[
+    // tidy-alphabetical-start
+    "adler2",
+    "aho-corasick",
+    "allocator-api2", // FIXME: only appears in Cargo.lock due to https://github.com/rust-lang/cargo/issues/10801
+    "annotate-snippets",
+    "anstyle",
+    "ar_archive_writer",
+    "arrayref",
+    "arrayvec",
+    "autocfg",
+    "bitflags",
+    "blake3",
+    "block-buffer",
+    "bstr",
+    "cc",
+    "cfg-if",
+    "cfg_aliases",
+    "constant_time_eq",
+    "cpufeatures",
+    "crc32fast",
+    "crossbeam-deque",
+    "crossbeam-epoch",
+    "crossbeam-utils",
+    "crypto-common",
+    "ctrlc",
+    "darling",
+    "darling_core",
+    "darling_macro",
+    "datafrog",
+    "derive-where",
+    "derive_setters",
+    "digest",
+    "displaydoc",
+    "dissimilar",
+    "either",
+    "elsa",
+    "ena",
+    "equivalent",
+    "errno",
+    "expect-test",
+    "fallible-iterator", // dependency of `thorin`
+    "fastrand",
+    "flate2",
+    "fluent-bundle",
+    "fluent-langneg",
+    "fluent-syntax",
+    "fnv",
+    "foldhash",
+    "generic-array",
+    "getopts",
+    "getrandom",
+    "gimli",
+    "gsgdt",
+    "hashbrown",
+    "icu_list",
+    "icu_list_data",
+    "icu_locid",
+    "icu_locid_transform",
+    "icu_locid_transform_data",
+    "icu_provider",
+    "icu_provider_adapters",
+    "icu_provider_macros",
+    "ident_case",
+    "indexmap",
+    "intl-memoizer",
+    "intl_pluralrules",
+    "itertools",
+    "itoa",
+    "jiff",
+    "jiff-static",
+    "jobserver",
+    "lazy_static",
+    "leb128",
+    "libc",
+    "libloading",
+    "linux-raw-sys",
+    "litemap",
+    "lock_api",
+    "log",
+    "matchers",
+    "md-5",
+    "measureme",
+    "memchr",
+    "memmap2",
+    "miniz_oxide",
+    "nix",
+    "nu-ansi-term",
+    "object",
+    "odht",
+    "once_cell",
+    "overload",
+    "parking_lot",
+    "parking_lot_core",
+    "pathdiff",
+    "perf-event-open-sys",
+    "pin-project-lite",
+    "polonius-engine",
+    "portable-atomic", // dependency for platforms doesn't support `AtomicU64` in std
+    "portable-atomic-util",
+    "ppv-lite86",
+    "proc-macro-hack",
+    "proc-macro2",
+    "psm",
+    "pulldown-cmark",
+    "pulldown-cmark-escape",
+    "punycode",
+    "quote",
+    "r-efi",
+    "rand",
+    "rand_chacha",
+    "rand_core",
+    "rand_xoshiro",
+    "redox_syscall",
+    "regex",
+    "regex-automata",
+    "regex-syntax",
+    "rustc-demangle",
+    "rustc-hash",
+    "rustc-literal-escaper",
+    "rustc-rayon-core",
+    "rustc-stable-hash",
+    "rustc_apfloat",
+    "rustix",
+    "ruzstd", // via object in thorin-dwp
+    "ryu",
+    "scoped-tls",
+    "scopeguard",
+    "self_cell",
+    "serde",
+    "serde_derive",
+    "serde_json",
+    "sha1",
+    "sha2",
+    "sharded-slab",
+    "shlex",
+    "smallvec",
+    "stable_deref_trait",
+    "stacker",
+    "static_assertions",
+    "strsim",
+    "syn",
+    "synstructure",
+    "tempfile",
+    "termcolor",
+    "termize",
+    "thin-vec",
+    "thiserror",
+    "thiserror-impl",
+    "thorin-dwp",
+    "thread_local",
+    "tikv-jemalloc-sys",
+    "tinystr",
+    "tinyvec",
+    "tinyvec_macros",
+    "tracing",
+    "tracing-attributes",
+    "tracing-core",
+    "tracing-log",
+    "tracing-subscriber",
+    "tracing-tree",
+    "twox-hash",
+    "type-map",
+    "typenum",
+    "unic-langid",
+    "unic-langid-impl",
+    "unic-langid-macros",
+    "unic-langid-macros-impl",
+    "unicase",
+    "unicode-ident",
+    "unicode-normalization",
+    "unicode-properties",
+    "unicode-script",
+    "unicode-security",
+    "unicode-width",
+    "unicode-xid",
+    "valuable",
+    "version_check",
+    "wasi",
+    "wasm-encoder",
+    "wasmparser",
+    "winapi",
+    "winapi-i686-pc-windows-gnu",
+    "winapi-util",
+    "winapi-x86_64-pc-windows-gnu",
+    "windows",
+    "windows-core",
+    "windows-implement",
+    "windows-interface",
+    "windows-link",
+    "windows-result",
+    "windows-strings",
+    "windows-sys",
+    "windows-targets",
+    "windows_aarch64_gnullvm",
+    "windows_aarch64_msvc",
+    "windows_i686_gnu",
+    "windows_i686_gnullvm",
+    "windows_i686_msvc",
+    "windows_x86_64_gnu",
+    "windows_x86_64_gnullvm",
+    "windows_x86_64_msvc",
+    "wit-bindgen-rt@0.39.0", // pinned to a specific version due to using a binary blob: <https://github.com/rust-lang/rust/pull/136395#issuecomment-2692769062>
+    "writeable",
+    "yoke",
+    "yoke-derive",
+    "zerocopy",
+    "zerocopy-derive",
+    "zerofrom",
+    "zerofrom-derive",
+    "zerovec",
+    "zerovec-derive",
+    // tidy-alphabetical-end
+];
 
-        // Skip our exceptions.
-        let is_exception = EXCEPTIONS.iter().any(|exception| {
-            dir.path()
-                .to_str()
-                .unwrap()
-                .contains(&format!("vendor/{}", exception))
-        });
-        if is_exception {
+const PERMITTED_STDLIB_DEPENDENCIES: &[&str] = &[
+    // tidy-alphabetical-start
+    "addr2line",
+    "adler2",
+    "cc",
+    "cfg-if",
+    "compiler_builtins",
+    "dlmalloc",
+    "fortanix-sgx-abi",
+    "getopts",
+    "gimli",
+    "hashbrown",
+    "hermit-abi",
+    "libc",
+    "memchr",
+    "miniz_oxide",
+    "object",
+    "r-efi",
+    "r-efi-alloc",
+    "rand",
+    "rand_core",
+    "rand_xorshift",
+    "rustc-demangle",
+    "rustc-literal-escaper",
+    "shlex",
+    "unicode-width",
+    "unwinding",
+    "wasi",
+    "windows-sys",
+    "windows-targets",
+    "windows_aarch64_gnullvm",
+    "windows_aarch64_msvc",
+    "windows_i686_gnu",
+    "windows_i686_gnullvm",
+    "windows_i686_msvc",
+    "windows_x86_64_gnu",
+    "windows_x86_64_gnullvm",
+    "windows_x86_64_msvc",
+    // tidy-alphabetical-end
+];
+
+const PERMITTED_CRANELIFT_DEPENDENCIES: &[&str] = &[
+    // tidy-alphabetical-start
+    "allocator-api2",
+    "anyhow",
+    "arbitrary",
+    "bitflags",
+    "bumpalo",
+    "cfg-if",
+    "cranelift-assembler-x64",
+    "cranelift-assembler-x64-meta",
+    "cranelift-bforest",
+    "cranelift-bitset",
+    "cranelift-codegen",
+    "cranelift-codegen-meta",
+    "cranelift-codegen-shared",
+    "cranelift-control",
+    "cranelift-entity",
+    "cranelift-frontend",
+    "cranelift-isle",
+    "cranelift-jit",
+    "cranelift-module",
+    "cranelift-native",
+    "cranelift-object",
+    "crc32fast",
+    "equivalent",
+    "fallible-iterator",
+    "foldhash",
+    "gimli",
+    "hashbrown",
+    "indexmap",
+    "libc",
+    "libloading",
+    "log",
+    "mach2",
+    "memchr",
+    "object",
+    "proc-macro2",
+    "quote",
+    "regalloc2",
+    "region",
+    "rustc-hash",
+    "serde",
+    "serde_derive",
+    "smallvec",
+    "stable_deref_trait",
+    "syn",
+    "target-lexicon",
+    "unicode-ident",
+    "wasmtime-jit-icache-coherence",
+    "windows-sys",
+    "windows-targets",
+    "windows_aarch64_gnullvm",
+    "windows_aarch64_msvc",
+    "windows_i686_gnu",
+    "windows_i686_gnullvm",
+    "windows_i686_msvc",
+    "windows_x86_64_gnu",
+    "windows_x86_64_gnullvm",
+    "windows_x86_64_msvc",
+    // tidy-alphabetical-end
+];
+
+/// Dependency checks.
+///
+/// `root` is path to the directory with the root `Cargo.toml` (for the workspace). `cargo` is path
+/// to the cargo executable.
+pub fn check(root: &Path, cargo: &Path, bless: bool, bad: &mut bool) {
+    let mut checked_runtime_licenses = false;
+
+    check_proc_macro_dep_list(root, cargo, bless, bad);
+
+    for &(workspace, exceptions, permitted_deps, submodules) in WORKSPACES {
+        if has_missing_submodule(root, submodules) {
             continue;
         }
 
-        let toml = dir.path().join("Cargo.toml");
-        *bad = *bad || !check_license(&toml);
-    }
-    assert!(saw_dir, "no vendored source");
-}
-
-/// Checks the dependency of `WHITELIST_CRATES` at the given path. Changes `bad` to `true` if a
-/// check failed.
-///
-/// Specifically, this checks that the dependencies are on the `WHITELIST`.
-pub fn check_whitelist(path: &Path, cargo: &Path, bad: &mut bool) {
-    // Get dependencies from Cargo metadata.
-    let resolve = get_deps(path, cargo);
-
-    // Get the whitelist in a convenient form.
-    let whitelist: HashSet<_> = WHITELIST.iter().cloned().collect();
-
-    // Check dependencies.
-    let mut visited = BTreeSet::new();
-    let mut unapproved = BTreeSet::new();
-    for &krate in WHITELIST_CRATES.iter() {
-        let mut bad = check_crate_whitelist(&whitelist, &resolve, &mut visited, krate, false);
-        unapproved.append(&mut bad);
-    }
-
-    if !unapproved.is_empty() {
-        println!("Dependencies not on the whitelist:");
-        for dep in unapproved {
-            println!("* {}", dep.id_str());
-        }
-        *bad = true;
-    }
-
-    check_crate_duplicate(&resolve, bad);
-}
-
-fn check_license(path: &Path) -> bool {
-    if !path.exists() {
-        panic!("{} does not exist", path.display());
-    }
-    let contents = t!(fs::read_to_string(&path));
-
-    let mut found_license = false;
-    for line in contents.lines() {
-        if !line.starts_with("license") {
+        if !root.join(workspace).join("Cargo.lock").exists() {
+            tidy_error!(bad, "the `{workspace}` workspace doesn't have a Cargo.lock");
             continue;
         }
-        let license = extract_license(line);
-        if !LICENSES.contains(&&*license) {
-            println!("invalid license {} in {}", license, path.display());
-            return false;
+
+        let mut cmd = cargo_metadata::MetadataCommand::new();
+        cmd.cargo_path(cargo)
+            .manifest_path(root.join(workspace).join("Cargo.toml"))
+            .features(cargo_metadata::CargoOpt::AllFeatures)
+            .other_options(vec!["--locked".to_owned()]);
+        let metadata = t!(cmd.exec());
+
+        check_license_exceptions(&metadata, exceptions, bad);
+        if let Some((crates, permitted_deps)) = permitted_deps {
+            check_permitted_dependencies(&metadata, workspace, permitted_deps, crates, bad);
         }
-        found_license = true;
-        break;
-    }
-    if !found_license {
-        println!("no license in {}", path.display());
-        return false;
+
+        if workspace == "library" {
+            check_runtime_license_exceptions(&metadata, bad);
+            checked_runtime_licenses = true;
+        }
     }
 
-    true
+    // Sanity check to ensure we don't accidentally remove the workspace containing the runtime
+    // crates.
+    assert!(checked_runtime_licenses);
 }
 
-fn extract_license(line: &str) -> String {
-    let first_quote = line.find('"');
-    let last_quote = line.rfind('"');
-    if let (Some(f), Some(l)) = (first_quote, last_quote) {
-        let license = &line[f + 1..l];
-        license.into()
+/// Ensure the list of proc-macro crate transitive dependencies is up to date
+fn check_proc_macro_dep_list(root: &Path, cargo: &Path, bless: bool, bad: &mut bool) {
+    let mut cmd = cargo_metadata::MetadataCommand::new();
+    cmd.cargo_path(cargo)
+        .manifest_path(root.join("Cargo.toml"))
+        .features(cargo_metadata::CargoOpt::AllFeatures)
+        .other_options(vec!["--locked".to_owned()]);
+    let metadata = t!(cmd.exec());
+    let is_proc_macro_pkg = |pkg: &Package| pkg.targets.iter().any(|target| target.is_proc_macro());
+
+    let mut proc_macro_deps = HashSet::new();
+    for pkg in metadata.packages.iter().filter(|pkg| is_proc_macro_pkg(*pkg)) {
+        deps_of(&metadata, &pkg.id, &mut proc_macro_deps);
+    }
+    // Remove the proc-macro crates themselves
+    proc_macro_deps.retain(|pkg| !is_proc_macro_pkg(&metadata[pkg]));
+
+    let proc_macro_deps: HashSet<_> =
+        proc_macro_deps.into_iter().map(|dep| metadata[dep].name.clone()).collect();
+    let expected = proc_macro_deps::CRATES.iter().map(|s| s.to_string()).collect::<HashSet<_>>();
+
+    let needs_blessing = proc_macro_deps.difference(&expected).next().is_some()
+        || expected.difference(&proc_macro_deps).next().is_some();
+
+    if needs_blessing && bless {
+        let mut proc_macro_deps: Vec<_> = proc_macro_deps.into_iter().collect();
+        proc_macro_deps.sort();
+        let mut file = File::create(root.join("src/bootstrap/src/utils/proc_macro_deps.rs"))
+            .expect("`proc_macro_deps` should exist");
+        writeln!(
+            &mut file,
+            "/// Do not update manually - use `./x.py test tidy --bless`
+/// Holds all direct and indirect dependencies of proc-macro crates in tree.
+/// See <https://github.com/rust-lang/rust/issues/134863>
+pub static CRATES: &[&str] = &[
+    // tidy-alphabetical-start"
+        )
+        .unwrap();
+        for dep in proc_macro_deps {
+            writeln!(&mut file, "    {dep:?},").unwrap();
+        }
+        writeln!(
+            &mut file,
+            "    // tidy-alphabetical-end
+];"
+        )
+        .unwrap();
     } else {
-        "bad-license-parse".into()
+        let old_bad = *bad;
+
+        for missing in proc_macro_deps.difference(&expected) {
+            tidy_error!(
+                bad,
+                "proc-macro crate dependency `{missing}` is not registered in `src/bootstrap/src/utils/proc_macro_deps.rs`",
+            );
+        }
+        for extra in expected.difference(&proc_macro_deps) {
+            tidy_error!(
+                bad,
+                "`{extra}` is registered in `src/bootstrap/src/utils/proc_macro_deps.rs`, but is not a proc-macro crate dependency",
+            );
+        }
+        if *bad != old_bad {
+            eprintln!("Run `./x.py test tidy --bless` to regenerate the list");
+        }
     }
 }
 
-/// Gets the dependencies of the crate at the given path using `cargo metadata`.
-fn get_deps(path: &Path, cargo: &Path) -> Resolve {
-    // Run `cargo metadata` to get the set of dependencies.
-    let output = Command::new(cargo)
-        .arg("metadata")
-        .arg("--format-version")
-        .arg("1")
-        .arg("--manifest-path")
-        .arg(path.join("../Cargo.toml"))
-        .output()
-        .expect("Unable to run `cargo metadata`")
-        .stdout;
-    let output = String::from_utf8_lossy(&output);
-    let output: Output = serde_json::from_str(&output).unwrap();
-
-    output.resolve
+/// Used to skip a check if a submodule is not checked out, and not in a CI environment.
+///
+/// This helps prevent enforcing developers to fetch submodules for tidy.
+pub fn has_missing_submodule(root: &Path, submodules: &[&str]) -> bool {
+    !CiEnv::is_ci()
+        && submodules.iter().any(|submodule| {
+            let path = root.join(submodule);
+            !path.exists()
+            // If the directory is empty, we can consider it as an uninitialized submodule.
+            || read_dir(path).unwrap().next().is_none()
+        })
 }
 
-/// Checks the dependencies of the given crate from the given cargo metadata to see if they are on
-/// the whitelist. Returns a list of illegal dependencies.
-fn check_crate_whitelist<'a>(
-    whitelist: &'a HashSet<Crate<'_>>,
-    resolve: &'a Resolve,
-    visited: &mut BTreeSet<CrateVersion<'a>>,
-    krate: CrateVersion<'a>,
-    must_be_on_whitelist: bool,
-) -> BTreeSet<Crate<'a>> {
-    // This will contain bad deps.
-    let mut unapproved = BTreeSet::new();
+/// Check that all licenses of runtime dependencies are in the valid list in `LICENSES`.
+///
+/// Unlike for tools we don't allow exceptions to the `LICENSES` list for the runtime with the sole
+/// exception of `fortanix-sgx-abi` which is only used on x86_64-fortanix-unknown-sgx.
+fn check_runtime_license_exceptions(metadata: &Metadata, bad: &mut bool) {
+    for pkg in &metadata.packages {
+        if pkg.source.is_none() {
+            // No need to check local packages.
+            continue;
+        }
+        let license = match &pkg.license {
+            Some(license) => license,
+            None => {
+                tidy_error!(bad, "dependency `{}` does not define a license expression", pkg.id);
+                continue;
+            }
+        };
+        if !LICENSES.contains(&license.as_str()) {
+            // This is a specific exception because SGX is considered "third party".
+            // See https://github.com/rust-lang/rust/issues/62620 for more.
+            // In general, these should never be added and this exception
+            // should not be taken as precedent for any new target.
+            if pkg.name == "fortanix-sgx-abi" && pkg.license.as_deref() == Some("MPL-2.0") {
+                continue;
+            }
 
-    // Check if we have already visited this crate.
-    if visited.contains(&krate) {
-        return unapproved;
+            tidy_error!(bad, "invalid license `{}` in `{}`", license, pkg.id);
+        }
     }
+}
 
-    visited.insert(krate);
-
-    // If this path is in-tree, we don't require it to be on the whitelist.
-    if must_be_on_whitelist {
-        // If this dependency is not on `WHITELIST`, add to bad set.
-        if !whitelist.contains(&krate.into()) {
-            unapproved.insert(krate.into());
+/// Check that all licenses of tool dependencies are in the valid list in `LICENSES`.
+///
+/// Packages listed in `exceptions` are allowed for tools.
+fn check_license_exceptions(metadata: &Metadata, exceptions: &[(&str, &str)], bad: &mut bool) {
+    // Validate the EXCEPTIONS list hasn't changed.
+    for (name, license) in exceptions {
+        // Check that the package actually exists.
+        if !metadata.packages.iter().any(|p| p.name == *name) {
+            tidy_error!(
+                bad,
+                "could not find exception package `{}`\n\
+                Remove from EXCEPTIONS list if it is no longer used.",
+                name
+            );
+        }
+        // Check that the license hasn't changed.
+        for pkg in metadata.packages.iter().filter(|p| p.name == *name) {
+            match &pkg.license {
+                None => {
+                    if *license == NON_STANDARD_LICENSE
+                        && EXCEPTIONS_NON_STANDARD_LICENSE_DEPS.contains(&pkg.name.as_str())
+                    {
+                        continue;
+                    }
+                    tidy_error!(
+                        bad,
+                        "dependency exception `{}` does not declare a license expression",
+                        pkg.id
+                    );
+                }
+                Some(pkg_license) => {
+                    if pkg_license.as_str() != *license {
+                        println!("dependency exception `{name}` license has changed");
+                        println!("    previously `{license}` now `{pkg_license}`");
+                        println!("    update EXCEPTIONS for the new license");
+                        *bad = true;
+                    }
+                }
+            }
         }
     }
 
-    // Do a DFS in the crate graph (it's a DAG, so we know we have no cycles!).
-    let to_check = resolve
+    let exception_names: Vec<_> = exceptions.iter().map(|(name, _license)| *name).collect();
+
+    // Check if any package does not have a valid license.
+    for pkg in &metadata.packages {
+        if pkg.source.is_none() {
+            // No need to check local packages.
+            continue;
+        }
+        if exception_names.contains(&pkg.name.as_str()) {
+            continue;
+        }
+        let license = match &pkg.license {
+            Some(license) => license,
+            None => {
+                tidy_error!(bad, "dependency `{}` does not define a license expression", pkg.id);
+                continue;
+            }
+        };
+        if !LICENSES.contains(&license.as_str()) {
+            tidy_error!(bad, "invalid license `{}` in `{}`", license, pkg.id);
+        }
+    }
+}
+
+/// Checks the dependency of `restricted_dependency_crates` at the given path. Changes `bad` to
+/// `true` if a check failed.
+///
+/// Specifically, this checks that the dependencies are on the `permitted_dependencies`.
+fn check_permitted_dependencies(
+    metadata: &Metadata,
+    descr: &str,
+    permitted_dependencies: &[&'static str],
+    restricted_dependency_crates: &[&'static str],
+    bad: &mut bool,
+) {
+    let mut has_permitted_dep_error = false;
+    let mut deps = HashSet::new();
+    for to_check in restricted_dependency_crates {
+        let to_check = pkg_from_name(metadata, to_check);
+        deps_of(metadata, &to_check.id, &mut deps);
+    }
+
+    // Check that the PERMITTED_DEPENDENCIES does not have unused entries.
+    for permitted in permitted_dependencies {
+        fn compare(pkg: &Package, permitted: &str) -> bool {
+            if let Some((name, version)) = permitted.split_once("@") {
+                let Ok(version) = Version::parse(version) else {
+                    return false;
+                };
+                pkg.name == name && pkg.version == version
+            } else {
+                pkg.name == permitted
+            }
+        }
+        if !deps.iter().any(|dep_id| compare(pkg_from_id(metadata, dep_id), permitted)) {
+            tidy_error!(
+                bad,
+                "could not find allowed package `{permitted}`\n\
+                Remove from PERMITTED_DEPENDENCIES list if it is no longer used.",
+            );
+            has_permitted_dep_error = true;
+        }
+    }
+
+    // Get in a convenient form.
+    let permitted_dependencies: HashMap<_, _> = permitted_dependencies
+        .iter()
+        .map(|s| {
+            if let Some((name, version)) = s.split_once('@') {
+                (name, Version::parse(version).ok())
+            } else {
+                (*s, None)
+            }
+        })
+        .collect();
+
+    for dep in deps {
+        let dep = pkg_from_id(metadata, dep);
+        // If this path is in-tree, we don't require it to be explicitly permitted.
+        if dep.source.is_some() {
+            let is_eq = if let Some(version) = permitted_dependencies.get(dep.name.as_str()) {
+                if let Some(version) = version { version == &dep.version } else { true }
+            } else {
+                false
+            };
+            if !is_eq {
+                tidy_error!(bad, "Dependency for {descr} not explicitly permitted: {}", dep.id);
+                has_permitted_dep_error = true;
+            }
+        }
+    }
+
+    if has_permitted_dep_error {
+        eprintln!("Go to `{PERMITTED_DEPS_LOCATION}` for the list.");
+    }
+}
+
+/// Finds a package with the given name.
+fn pkg_from_name<'a>(metadata: &'a Metadata, name: &'static str) -> &'a Package {
+    let mut i = metadata.packages.iter().filter(|p| p.name == name);
+    let result =
+        i.next().unwrap_or_else(|| panic!("could not find package `{name}` in package list"));
+    assert!(i.next().is_none(), "more than one package found for `{name}`");
+    result
+}
+
+fn pkg_from_id<'a>(metadata: &'a Metadata, id: &PackageId) -> &'a Package {
+    metadata.packages.iter().find(|p| &p.id == id).unwrap()
+}
+
+/// Recursively find all dependencies.
+fn deps_of<'a>(metadata: &'a Metadata, pkg_id: &'a PackageId, result: &mut HashSet<&'a PackageId>) {
+    if !result.insert(pkg_id) {
+        return;
+    }
+    let node = metadata
+        .resolve
+        .as_ref()
+        .unwrap()
         .nodes
         .iter()
-        .find(|n| n.id.starts_with(&krate.id_str()))
-        .expect("crate does not exist");
-
-    for dep in to_check.dependencies.iter() {
-        let (krate, is_path_dep) = CrateVersion::from_str(dep);
-
-        let mut bad = check_crate_whitelist(whitelist, resolve, visited, krate, !is_path_dep);
-        unapproved.append(&mut bad);
-    }
-
-    unapproved
-}
-
-fn check_crate_duplicate(resolve: &Resolve, bad: &mut bool) {
-    const FORBIDDEN_TO_HAVE_DUPLICATES: &[&str] = &[
-        // These two crates take quite a long time to build, so don't allow two versions of them
-        // to accidentally sneak into our dependency graph, in order to ensure we keep our CI times
-        // under control.
-
-        "cargo",
-        "rustc-ap-syntax",
-    ];
-    let mut name_to_id: HashMap<_, Vec<_>> = HashMap::new();
-    for node in resolve.nodes.iter() {
-        name_to_id.entry(node.id.split_whitespace().next().unwrap())
-            .or_default()
-            .push(&node.id);
-    }
-
-    for name in FORBIDDEN_TO_HAVE_DUPLICATES {
-        if name_to_id[name].len() <= 1 {
-            continue
-        }
-        println!("crate `{}` is duplicated in `Cargo.lock`", name);
-        for id in name_to_id[name].iter() {
-            println!("  * {}", id);
-        }
-        *bad = true;
+        .find(|n| &n.id == pkg_id)
+        .unwrap_or_else(|| panic!("could not find `{pkg_id}` in resolve"));
+    for dep in &node.deps {
+        deps_of(metadata, &dep.pkg, result);
     }
 }
